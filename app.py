@@ -113,6 +113,11 @@ with st.sidebar:
     
     # Model settings
     st.markdown("### 🎛️ Model Settings")
+    model_name = st.selectbox(
+        "Select Model",
+        ["models/gemini-1.5-flash-latest", "models/gemini-1.5-pro-latest", "models/gemini-2.0-flash"],
+        index=0
+    )
     temperature = st.slider("Temperature", 0.0, 1.0, 0.0, 0.1)
     max_results = st.slider("Retrieved Chunks", 1, 20, 10)
     
@@ -150,7 +155,7 @@ def load_and_process_pdf(file_path):
         return None, 0, str(e)
 
 # Function to get answer
-def ask_question(question, vectorstore, temperature, max_results):
+def ask_question(question, vectorstore, temperature, max_results, model_name):
     if not api_key:
         return "⚠️ API key not configured. Please add GEMINI_API_KEY to your .env file."
     
@@ -173,7 +178,7 @@ Answer:"""
         
         # Using your specified model
         llm = ChatGoogleGenerativeAI(
-            model="models/gemini-2.0-flash",  # Using your specified model
+            model=model_name,
             temperature=temperature,
             google_api_key=api_key
         )
@@ -256,7 +261,8 @@ if prompt := st.chat_input("💬 Ask me anything about the document..."):
                     prompt,
                     st.session_state.vectorstore,
                     temperature,
-                    max_results
+                    max_results,
+                    model_name
                 )
                 st.write(response)  # Using st.write instead of st.markdown
         
