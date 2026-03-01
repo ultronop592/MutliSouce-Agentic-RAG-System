@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: GEMINI_API_KEY
         sync: false
@@ -13,4 +13,4 @@ services:
       - key: QDRANT_API_KEY
         sync: false
       - key: PYTHON_VERSION
-        value: 3.11.0 # Or your preferred version
+        value: 3.11.11
