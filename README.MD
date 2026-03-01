@@ -26,9 +26,16 @@ Instead of searching a single flat database, the **Planner** acts as a traffic c
 - **Expanded Context**: The system retrieves the top 15 candidates and reranks them to provide the LLM with the 10 most relevant context blocks.
 
 ### 4. Expert Synthesis (Gemini 2.5 Flash)
-The final stage uses **Gemini 2.5 Flash** with a meticulously tuned system prompt to produce **"Natural Expert Prose."**
-- **Flowing Narrative**: Information is synthesized into coherent paragraphs, avoiding robotic bullet points or section labels.
+The final stage uses **Gemini 2.5 Flash** with a meticulously tuned system prompt to produce **Strictly Plain Prose**.
+- **Natural Conversation**: Information is synthesized into 2–3 coherent paragraphs.
+- **No Formatting Clutter**: Explicitly forbids markdown headers, bullet points, and source citations, creating a conversational and human-like response.
 - **Zero-CORS Latency**: The architecture is designed for real-time streaming to the Next.js frontend on port 3000.
+
+### 5. Professional UI (Frontend)
+The Next.js frontend features a modern, enterprise-grade interface.
+- **Clean Light Theme**: A professional off-white/teal color palette designed for readability and focus.
+- **Enterprise Aesthetics**: Minimalist design with subtle shadows, removing gamer-style glow effects and dark backgrounds.
+- **Interactive Experience**: Streaming chat responses and drag-and-drop PDF uploads.
 
 ## 🚥 Quick Start
 

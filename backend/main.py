@@ -22,9 +22,9 @@ async def lifespan(app: FastAPI):
     """Ensure Qdrant collections exist on startup."""
     try:
         ensure_collections()
-        print("✅ Qdrant collections verified")
+        print("Qdrant collections verified")
     except Exception as e:
-        print(f"⚠️  Qdrant connection warning: {e}")
+        print(f" Qdrant connection warning: {e}")
     yield
 
 
@@ -35,10 +35,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow Next.js dev server
+# CORS — allow Next.js dev server and Vercel production deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,24 +164,31 @@ async def chat(request: ChatRequest):
     # Get chat memory
     memory = chat_memory.format_history(session_id)
 
-    # Natural Expert Persona (Strict Prose Instructions)
-    prompt = f"""Use the following system instructions to answer the user query:
-1. Answer questions in clear, concise, flowing prose — like a knowledgeable expert speaking naturally.
-2. Never use markdown headers (##, ###), bullet points, bold text, or numbered lists unless the user explicitly asks for them.
-3. Never include executive summaries, technical deep-dives, or section labels.
-4. Do not expose internal source labels, figure references like [Figure 1], or citation numbers like [10] to the user.
-5. Synthesize retrieved information into a single coherent paragraph or two. Do not dump document structure.
-6. Keep answers concise and direct. Avoid redundancy and over-explanation.
+    # Professional Plain-Prose System Prompt
+    prompt = f"""You are a helpful assistant that answers questions in plain, natural prose.
+
+STRICT RULES — follow these without exception:
+- Do NOT use markdown headers (##, ###, ####).
+- Do NOT use bullet points or numbered lists.
+- Do NOT use bold (**), italic (*), or any markdown formatting.
+- Do NOT write "Executive Summary", "Technical Deep-Dive", or any section labels.
+- Do NOT include citation numbers like [1], [10] or figure references like [Figure 1].
+- Do NOT expose source names like "research_papers", "knowledge_base", or "code_docs" to the user.
+- Write your answer as 2–3 plain sentences or short paragraphs only.
+- Synthesize the retrieved context naturally — do not copy its structure or repeat it verbatim.
+- Sound like a knowledgeable human explaining something conversationally, not a document or a report.
+- If the context does not contain enough information to answer, say so honestly in one sentence.
 
 Previous Conversation:
 {memory}
 
-Retrieved Information Context:
+Retrieved Context:
 {context}
 
 User Question:
 {question}
-"""
+
+Answer (plain prose, no formatting):"""
 
     # Stream response
     async def generate():

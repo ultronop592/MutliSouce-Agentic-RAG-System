@@ -6,6 +6,6 @@ from core.config import GEMINI_API_KEY
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0.3,
-    max_tokens=1024,
+    max_tokens=2048,
     google_api_key=GEMINI_API_KEY,
 )
