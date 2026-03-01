@@ -16,10 +16,26 @@ COLLECTIONS = [
 
 
 def ensure_collections():
-    """Create Qdrant collections if they don't exist."""
-    existing = [c.name for c in qdrant.get_collections().collections]
+    """Create Qdrant collections if they don't exist. Recreate if vector size changed."""
+    existing = {c.name: c for c in qdrant.get_collections().collections}
     for name in COLLECTIONS:
-        if name not in existing:
+        if name in existing:
+            # Check if vector size matches (handles migration from 384 to 768)
+            try:
+                info = qdrant.get_collection(name)
+                if info.config.params.vectors.size != VECTOR_SIZE:
+                    print(f"Recreating {name}: vector size changed to {VECTOR_SIZE}")
+                    qdrant.delete_collection(name)
+                    qdrant.create_collection(
+                        collection_name=name,
+                        vectors_config=VectorParams(
+                            size=VECTOR_SIZE,
+                            distance=Distance.COSINE,
+                        ),
+                    )
+            except Exception:
+                pass
+        else:
             qdrant.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(
@@ -27,7 +43,7 @@ def ensure_collections():
                     distance=Distance.COSINE,
                 ),
             )
-    return existing
+    return list(existing.keys())
 
 
 def ingest_pdf(file_path: str, collection: str = "research_papers"):
