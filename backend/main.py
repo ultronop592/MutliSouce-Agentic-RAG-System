@@ -1,57 +1,87 @@
+"""
+Multi-Source Agentic RAG — FastAPI Application
+===============================================
+Entry point for the production RAG backend.
+
+Agent pipeline (coordinated by the Orchestrator):
+  Router Agent  →  Memory Agent  →  Retrieval Agent
+                                         ↓
+                                   Reranker Agent
+                                         ↓
+                                   Guard (confidence)
+                                         ↓
+                                   Answer Agent (streamed)
+
+All heavy logic lives in agents/ — main.py only handles HTTP routing,
+startup/shutdown, and error boundaries.
+"""
+
 import os
-import uuid
 import shutil
 import tempfile
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-from retrieval.planner import planner
-from retrieval.retriever import hybrid_retrieve
-from retrieval.guard import assess_confidence
+from agents.orchestrator import orchestrator
 from retrieval.bm25_index import bm25_manager
-from core.llm import llm
-from core.embeddings import embeddings
-from cache.cache import response_cache
 from memory.memory import chat_memory
+from cache.cache import response_cache
 from ingestion.ingestion import ingest_pdf, ensure_collections, COLLECTIONS
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+# ── Lifespan ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ensure Qdrant collections exist and pre-load BM25 indexes on startup."""
+    """Startup: verify Qdrant, pre-load BM25 indexes from existing documents."""
+    logger.info("=== RAG Backend starting up ===")
+
+    # 1. Ensure Qdrant collections exist
     try:
         ensure_collections()
-        print("Qdrant collections verified")
+        logger.info("Qdrant collections verified")
     except Exception as e:
-        print(f" Qdrant connection warning: {e}")
+        logger.warning("Qdrant connection warning: %s", e)
 
-    # Pre-load BM25 indexes from all existing Qdrant documents.
-    # This ensures BM25 keyword search works from the very first request
-    # even before any new uploads happen after server start.
+    # 2. Pre-load BM25 indexes from ALL existing Qdrant documents.
+    #    Without this, BM25 search returns nothing until the first upload.
     try:
         counts = bm25_manager.refresh_all(COLLECTIONS)
         for col, n in counts.items():
             if n > 0:
-                print(f"BM25 index loaded: '{col}' — {n} docs")
-        print("BM25 indexes ready")
+                logger.info("BM25 index loaded: '%s' — %d docs", col, n)
+        logger.info("BM25 indexes ready")
     except Exception as e:
-        print(f" BM25 index warning: {e}")
+        logger.warning("BM25 index warning: %s", e)
 
+    logger.info("=== RAG Backend ready ===")
     yield
+    logger.info("=== RAG Backend shutting down ===")
 
+
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Multi-Source Agentic RAG API",
-    description="RAG API with Qdrant, Gemini, and hybrid retrieval",
-    version="2.0.0",
+    description=(
+        "Production-ready multi-agent RAG with hybrid search (semantic + BM25 + RRF), "
+        "Gemini reranking, hallucination guard, semantic cache, and conversation memory."
+    ),
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-# CORS — allow all origins for Vercel + local dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -61,7 +91,7 @@ app.add_middleware(
 )
 
 
-# ---------- Pydantic Models ----------
+# ── Pydantic Models ───────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     question: str
@@ -75,26 +105,34 @@ class UploadResponse(BaseModel):
     message: str
 
 
-# ---------- Endpoints ----------
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
     return {
         "service": "Multi-Source Agentic RAG",
+        "version": "3.0.0",
         "status": "running",
-        "version": "2.0.0",
-        "endpoints": ["/chat", "/upload", "/collections", "/memory"],
+        "pipeline": [
+            "RouterAgent",
+            "MemoryAgent",
+            "RetrievalAgent (semantic + BM25 + RRF)",
+            "RerankerAgent (Gemini pointwise)",
+            "HallucinationGuard",
+            "AnswerAgent (streamed)",
+        ],
+        "endpoints": ["/chat", "/upload", "/collections", "/memory", "/health"],
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "3.0.0"}
 
 
 @app.get("/collections")
 async def list_collections():
-    """List all Qdrant collections with their point counts."""
+    """List all Qdrant collections with point counts and BM25 index status."""
     from core.qdrant_client import qdrant
     try:
         ensure_collections()
@@ -107,16 +145,31 @@ async def list_collections():
                     "name": col.name,
                     "points_count": col_info.points_count,
                     "vectors_count": col_info.vectors_count,
+                    "bm25_docs": bm25_manager.doc_count(col.name),
+                    "bm25_ready": bm25_manager.has_index(col.name),
                 })
             except Exception:
                 collection_list.append({
                     "name": col.name,
                     "points_count": 0,
                     "vectors_count": 0,
+                    "bm25_docs": 0,
+                    "bm25_ready": False,
                 })
         return {"collections": collection_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list collections: {str(e)}")
+
+
+@app.get("/memory/{session_id}")
+async def get_memory(session_id: str):
+    """Return conversation history for a session."""
+    history_str = chat_memory.format_history(session_id)
+    return {
+        "session_id": session_id,
+        "turn_count": chat_memory.turn_count(session_id),
+        "history": history_str,
+    }
 
 
 @app.post("/upload")
@@ -124,7 +177,7 @@ async def upload_pdf(
     file: UploadFile = File(...),
     collection: str = "research_papers",
 ):
-    """Upload a PDF file and ingest it into a Qdrant collection."""
+    """Upload a PDF and ingest it into Qdrant. Automatically refreshes BM25 index."""
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -142,9 +195,13 @@ async def upload_pdf(
             filename=file.filename,
             chunks_ingested=chunks_count,
             collection=collection,
-            message=f"Successfully ingested {chunks_count} chunks from {file.filename}",
+            message=(
+                f"Successfully ingested {chunks_count} chunks from '{file.filename}'. "
+                f"BM25 index refreshed."
+            ),
         )
     except Exception as e:
+        logger.error("Ingestion failed for %s: %s", file.filename, e)
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -153,8 +210,18 @@ async def upload_pdf(
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """
-    Chat endpoint with streaming, hybrid retrieval, hallucination guard,
-    semantic cache, and conversation memory.
+    Main chat endpoint — full multi-agent RAG pipeline.
+
+    Pipeline:
+      1. Router Agent   — classify query intent
+      2. Cache check    — semantic similarity lookup (fast path)
+      3. Memory Agent   — semantic memory lookup (fast path)
+      4. Retrieval Agent — hybrid search (semantic + BM25 + RRF)
+      5. Reranker Agent  — Gemini pointwise reranking
+      6. Guard          — confidence assessment
+      7. Answer Agent   — grounded streaming response
+
+    Returns a StreamingResponse of plain text.
     """
     question = request.question.strip()
     session_id = request.session_id
@@ -162,107 +229,24 @@ async def chat(request: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-    # ── Semantic cache lookup ────────────────────────────────────────────────
-    # Embed the question for semantic cache lookup (single call, reused below).
     try:
-        question_embedding = embeddings.embed_query(question)
-        cached_answer = response_cache.get(question_embedding)
-        if cached_answer:
-            return {"answer": cached_answer, "cached": True}
-    except Exception:
-        question_embedding = None
-
-    # ── Plan which collections to search ────────────────────────────────────
-    selected = planner(question)
-
-    # ── Hybrid retrieval — returns (docs, docs_with_scores) ─────────────────
-    top_docs, docs_with_scores = await hybrid_retrieve(question, selected)
-
-    # ── Hallucination Guard — assess retrieval confidence ───────────────────
-    confidence_level, advisory_note = assess_confidence(docs_with_scores)
-
-    # ── Build context string ─────────────────────────────────────────────────
-    if top_docs:
-        context = "\n\n---\n\n".join(top_docs)
-    else:
-        context = "No relevant documents found."
-
-    # ── Get chat memory ──────────────────────────────────────────────────────
-    memory = chat_memory.format_history(session_id)
-
-    # ── Anti-Hallucination Prompt ────────────────────────────────────────────
-    # This prompt is the primary defence against hallucination.
-    # Key principles:
-    #   1. Explicitly forbids adding any fact not present in the context.
-    #   2. Injects the guard's advisory note so the LLM knows confidence level.
-    #   3. Provides an explicit honest-fallback instruction.
-    #   4. Removes any language that implicitly encourages inference/synthesis.
-    prompt = f"""You are a precise, factual assistant. Your ONLY job is to answer
-the user's question using the retrieved context below — nothing else.
-
-{advisory_note}
-
-STRICT GROUNDING RULES — violating these is your #1 failure mode:
-1. ONLY use facts, numbers, names, dates, and claims that appear explicitly
-   in the Retrieved Context section below.
-2. Do NOT add any information from your general training knowledge, even if
-   you are confident it is correct.
-3. Do NOT infer, extrapolate, or "fill in" information that is absent from
-   the context.
-4. If the context does not contain enough information to answer the question
-   fully, say: "I don't have enough information in my knowledge base to answer
-   this accurately." — do NOT attempt a partial answer that invents details.
-5. Do NOT use markdown headers (##, ###), bullet points, bold (**), or italic (*).
-6. Do NOT include citation numbers like [1] or figure references like [Figure 1].
-7. Write 2–3 plain sentences maximum. Be concise and direct.
-8. Before writing each sentence, mentally verify: "Is this fact explicitly
-   stated in the Retrieved Context?" If not, do not include it.
-
-Previous Conversation:
-{memory}
-
-Retrieved Context:
-{context}
-
-User Question:
-{question}
-
-Answer (plain prose, strictly grounded in the context above):"""
-
-    # ── Stream response ──────────────────────────────────────────────────────
-    async def generate():
-        full_response = ""
-        try:
-            response = llm.stream(prompt)
-            for chunk in response:
-                if chunk.content:
-                    full_response += chunk.content
-                    yield chunk.content
-        except Exception as e:
-            error_msg = f"\n\n[Error generating response: {str(e)}]"
-            yield error_msg
-            full_response += error_msg
-        finally:
-            # Update memory and semantic cache
-            if full_response and not full_response.startswith("\n\n[Error"):
-                chat_memory.update(session_id, question, full_response)
-                # Only cache if we had a question embedding (non-error path)
-                if question_embedding is not None:
-                    response_cache.set(question_embedding, full_response)
-
-    return StreamingResponse(generate(), media_type="text/plain")
+        stream = await orchestrator.handle(question, session_id)
+        return StreamingResponse(stream, media_type="text/plain")
+    except Exception as e:
+        logger.error("Orchestrator error for session=%s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
 
 
 @app.delete("/memory/{session_id}")
 async def clear_memory(session_id: str):
-    """Clear chat memory for a session."""
+    """Clear conversation memory for a specific session."""
     chat_memory.clear(session_id)
-    return {"message": f"Memory cleared for session {session_id}"}
+    return {"message": f"Memory cleared for session '{session_id}'"}
 
 
 @app.delete("/memory")
 async def clear_all_memory():
-    """Clear all chat memory and semantic cache."""
+    """Clear all conversation memory and semantic response cache."""
     chat_memory.clear_all()
     response_cache.clear()
     return {"message": "All memory and cache cleared"}
