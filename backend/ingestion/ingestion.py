@@ -1,10 +1,14 @@
 import uuid
+import logging
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client.models import VectorParams, Distance, PointStruct
 
 from core.embeddings import embeddings, VECTOR_SIZE
 from core.qdrant_client import qdrant
+from retrieval.bm25_index import bm25_manager
+
+logger = logging.getLogger(__name__)
 
 
 COLLECTIONS = [
@@ -92,5 +96,14 @@ def ingest_pdf(file_path: str, collection: str = "research_papers"):
     for i in range(0, len(points), batch_size):
         batch = points[i : i + batch_size]
         qdrant.upsert(collection_name=collection, points=batch)
+
+    # ── Refresh BM25 index for this collection ───────────────────────────
+    # BM25 needs to know about the new documents so keyword search works
+    # on the full updated corpus (not just what existed at startup).
+    try:
+        count = bm25_manager.refresh(collection)
+        logger.info("BM25 index refreshed for '%s': %d docs", collection, count)
+    except Exception as e:
+        logger.warning("BM25 refresh failed after ingest: %s", e)
 
     return len(points)
