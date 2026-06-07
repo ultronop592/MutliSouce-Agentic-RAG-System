@@ -56,8 +56,29 @@ COLLECTION_CONFIDENCE = {
 
 # ── Query Rewriting ──────────────────────────────────────────────────────────
 
+# Minimum word count before we bother calling Gemini to rewrite.
+# Short queries like "what is RAG?" are already clear — no rewrite needed.
+_REWRITE_MIN_WORDS: int = 5
+
+# Vague reference words that always trigger a rewrite regardless of length
+_VAGUE_TRIGGERS = {"pdf", "document", "file", "this", "that", "it", "about"}
+
+
 def rewrite_query(question: str) -> str:
-    """Use Gemini to rewrite the user question into a better search query."""
+    """Use Gemini to rewrite the user question into a better search query.
+
+    Bypass logic: skip the rewrite (save one LLM call) when the query is
+    already short and specific, unless it contains vague reference words.
+    """
+    words = question.lower().split()
+    has_vague = bool(set(words) & _VAGUE_TRIGGERS)
+    too_short = len(words) < _REWRITE_MIN_WORDS
+
+    # Skip rewrite for short, specific queries (no vague words)
+    if too_short and not has_vague:
+        logger.debug("Query rewrite skipped (short+specific): '%s'", question[:60])
+        return question
+
     try:
         prompt = (
             "Your task: rewrite the user's question into ONE clear, specific, "
@@ -73,11 +94,9 @@ def rewrite_query(question: str) -> str:
             "Rewritten search query:"
         )
         response = llm.invoke(prompt)
-        rewritten = response.content.strip()
-        # Strip any quotes Gemini may wrap around the response
-        rewritten = rewritten.strip('"\'')
+        rewritten = response.content.strip().strip('"\'')
         if rewritten and len(rewritten) > 3:
-            logger.debug("Query rewritten: '%s' -> '%s'", question[:60], rewritten[:60])
+            logger.info("Query rewritten: '%s' -> '%s'", question[:60], rewritten[:60])
             return rewritten
     except Exception as e:
         logger.warning("Query rewrite failed: %s", e)
@@ -154,16 +173,28 @@ async def hybrid_retrieve(
         total_semantic, len(selected),
     )
 
-    # ── Step 3 + 4: BM25 search + RRF fusion ────────────────────────────────
-    # hybrid.py runs BM25 independently on each collection's full corpus,
-    # then merges with RRF.
+    # ── Step 3 + 4: BM25 search + Ensemble + RRF fusion ────────────────────
     fused: list[tuple[str, float]] = fuse_all_collections(per_collection, rewritten)
 
     if not fused:
-        # Both legs returned nothing — return empty for guard to catch
         return [], []
 
     top_docs = [text for text, _ in fused]
-    logger.debug("Hybrid retrieval final result: %d docs", len(top_docs))
 
-    return top_docs, fused
+    # ── Guard scores: use RAW COSINE similarities, NOT fused RRF scores ──────
+    # RRF stability scores are always ~0.015–0.016 regardless of relevance.
+    # The guard needs REAL relevance signals (cosine 0-1) to correctly classify
+    # HIGH vs LOW vs NONE confidence.
+    all_semantic: list[tuple[str, float]] = []
+    for hits in per_collection.values():
+        all_semantic.extend(hits)
+    all_semantic.sort(key=lambda x: x[1], reverse=True)
+    guard_scores = all_semantic[:len(top_docs)] or fused  # fallback to fused if empty
+
+    logger.info(
+        "Retrieval: %d fused docs | guard scores: top=%.3f avg=%.3f",
+        len(top_docs),
+        guard_scores[0][1] if guard_scores else 0,
+        sum(s for _, s in guard_scores) / len(guard_scores) if guard_scores else 0,
+    )
+    return top_docs, guard_scores

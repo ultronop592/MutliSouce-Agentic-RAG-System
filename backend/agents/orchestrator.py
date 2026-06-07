@@ -114,9 +114,18 @@ class Orchestrator:
         top_docs: list[str] = retrieval_result.data.get("docs", [])
         docs_with_scores: list[tuple[str, float]] = retrieval_result.data.get("scored", [])
 
-        # Step C2: Reranking (Gemini pointwise scoring)
-        rerank_result = reranker_agent.run(query, top_docs)
-        reranked_docs: list[str] = rerank_result.data if rerank_result.success else top_docs
+        # Step C2: Reranking — only if enough docs to meaningfully reorder
+        # Reranking adds ~10s (one extra Gemini call). With <=4 docs the ensemble
+        # ordering is already high quality, so skip it to save latency.
+        RERANK_MIN_DOCS = 5
+        if len(top_docs) >= RERANK_MIN_DOCS:
+            rerank_result = reranker_agent.run(query, top_docs)
+            reranked_docs: list[str] = rerank_result.data if rerank_result.success else top_docs
+            logger.info("Reranker: applied (%d docs)", len(reranked_docs))
+        else:
+            reranked_docs = top_docs
+            logger.info("Reranker: skipped (%d docs, threshold=%d) — using ensemble order",
+                        len(top_docs), RERANK_MIN_DOCS)
 
         # Step C3: Hallucination guard (uses original scores for confidence)
         confidence_level, advisory_note = assess_confidence(docs_with_scores)
