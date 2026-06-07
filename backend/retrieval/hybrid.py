@@ -1,132 +1,134 @@
 """
-Hybrid Search Engine — Reciprocal Rank Fusion (RRF)
-----------------------------------------------------
-Runs TWO completely independent searches and fuses the ranked results:
+Hybrid Search Engine — Ensemble + RRF Pipeline
+------------------------------------------------
+Runs TWO completely independent searches and fuses results through a
+two-stage combination pipeline:
 
-  1. Semantic Search  — Qdrant vector (cosine) search
-                        finds conceptually / semantically similar chunks
-                        even when exact keywords differ.
+  Stage 1 — ENSEMBLE COMBINER  (retrieval/ensemble.py)
+  ────────────────────────────────────────────────────
+  Semantic Search  — Qdrant vector (cosine) search
+  BM25 Search      — Full-corpus BM25Okapi keyword search (entire index)
 
-  2. BM25 Search      — Full-corpus keyword search via BM25Okapi
-                        finds chunks with high keyword / term overlap.
-                        Runs on ALL documents in the collection (not just
-                        the top-N from vector search), so it's truly
-                        independent.
+  Both results are combined using WEIGHTED ENSEMBLE MATCHING:
+    1. Min-max normalize scores from each leg to [0, 1]
+    2. Weighted sum: 0.65 × semantic_score + 0.35 × bm25_score
+    3. Cross-leg bonus for documents found by BOTH methods
+       (geometric mean bonus = 0.10 × √(sem × bm25))
 
-  3. Fusion           — Reciprocal Rank Fusion (RRF) combines both ranked
-                        lists into a single ranking without needing to
-                        normalise scores from different scales.
+  Stage 2 — RRF STABILITY LAYER
+  ─────────────────────────────
+  The ensemble scores are re-ranked using Reciprocal Rank Fusion as a
+  final stability pass. This handles edge cases where min-max
+  normalization produces near-ties and ensures a stable final ranking.
 
-Why RRF?
-  Vector scores are cosine similarities (0-1 range, distribution varies).
-  BM25 scores are TF-IDF-like (0-∞ range, collection-dependent).
-  RRF avoids score normalisation by working purely on RANK positions:
-
-      RRF(doc) = Σ  1 / (k + rank_i)      k = 60 (standard constant)
-
-  A document ranked #1 by BOTH searches gets ~2 × (1/61) ≈ 0.033,
-  outscoring anything ranked high by only one leg.
+Why two stages?
+  Ensemble preserves score magnitude (quality signal).
+  RRF smooths out rank instability from score normalization.
+  Together they outperform either method alone.
 """
 
+import logging
 from retrieval.bm25_index import bm25_manager
+from retrieval.ensemble import ensemble_combine_multi_collection
 
-# RRF constant — 60 is the standard value from the original RRF paper
-RRF_K: int = 60
+logger = logging.getLogger(__name__)
 
-# How many results to request from each search leg
-SEMANTIC_TOP_K: int = 10
+# How many results to request from BM25 search per collection
 BM25_TOP_K: int = 10
 
-# Final number of fused documents to surface
+# Exported — used by retriever.py for semantic fetch size
+SEMANTIC_TOP_K: int = 10
+
+# Final documents returned after all fusion stages
 FINAL_TOP_K: int = 6
 
+# RRF stability constant (standard value from original paper)
+RRF_K: int = 60
 
-def reciprocal_rank_fusion(
-    semantic_results: list[tuple[str, float]],
-    bm25_results: list[tuple[str, float]],
+
+# ── Stage 2: RRF stability layer ─────────────────────────────────────────────
+
+def _rrf_stability(
+    results: list[tuple[str, float]],
     k: int = RRF_K,
 ) -> list[tuple[str, float]]:
     """
-    Merge two ranked lists using Reciprocal Rank Fusion.
-
-    Args:
-        semantic_results: [(text, score), ...] sorted descending by vector score
-        bm25_results:     [(text, score), ...] sorted descending by BM25 score
-        k:                RRF smoothing constant (default 60)
-
-    Returns:
-        [(text, rrf_score), ...] sorted descending by fused RRF score
+    Apply RRF as a re-ranking stability pass on already-combined results.
+    Input is a pre-sorted list; RRF converts rank positions back to smooth scores.
     """
-    rrf_scores: dict[str, float] = {}
-
-    # Accumulate RRF score from the semantic (vector) leg
-    for rank, (text, _score) in enumerate(semantic_results, start=1):
-        rrf_scores[text] = rrf_scores.get(text, 0.0) + 1.0 / (k + rank)
-
-    # Accumulate RRF score from the BM25 leg
-    for rank, (text, _score) in enumerate(bm25_results, start=1):
-        rrf_scores[text] = rrf_scores.get(text, 0.0) + 1.0 / (k + rank)
-
-    # Sort by combined RRF score descending
-    fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    return fused  # [(text, rrf_score), ...]
+    return [
+        (text, 1.0 / (k + rank))
+        for rank, (text, _) in enumerate(results, start=1)
+    ]
 
 
-def hybrid_search_collection(
-    collection: str,
-    query: str,
-    semantic_hits: list[tuple[str, float]],
-) -> list[tuple[str, float]]:
-    """
-    Run BM25 search on `collection` and fuse with the semantic hits using RRF.
+# ── BM25 collection search ────────────────────────────────────────────────────
 
-    Args:
-        collection:    Qdrant collection name
-        query:         rewritten search query string
-        semantic_hits: [(text, vector_score), ...] already retrieved from Qdrant
+def _bm25_search_all(
+    selected: list[str], query: str
+) -> dict[str, list[tuple[str, float]]]:
+    """Run BM25 search on all selected collections independently."""
+    per_col: dict[str, list[tuple[str, float]]] = {}
+    for collection in selected:
+        hits = bm25_manager.search(collection, query, top_k=BM25_TOP_K)
+        per_col[collection] = hits
+        if hits:
+            logger.debug("BM25 '%s': %d hits (top=%.4f)", collection, len(hits), hits[0][1])
+        else:
+            logger.debug("BM25 '%s': no hits (index empty or no keyword overlap)", collection)
+    return per_col
 
-    Returns:
-        [(text, rrf_score), ...] fused and sorted, capped to FINAL_TOP_K
-    """
-    # BM25 search — independent, searches the FULL corpus index
-    bm25_hits = bm25_manager.search(collection, query, top_k=BM25_TOP_K)
 
-    if not bm25_hits:
-        # No BM25 index yet (e.g., empty collection) — fall back to semantic only
-        return [(t, s) for t, s in semantic_hits[:FINAL_TOP_K]]
-
-    # RRF fusion
-    fused = reciprocal_rank_fusion(semantic_hits, bm25_hits)
-    return fused[:FINAL_TOP_K]
-
+# ── Main fusion entry point ───────────────────────────────────────────────────
 
 def fuse_all_collections(
     per_collection_semantic: dict[str, list[tuple[str, float]]],
     query: str,
 ) -> list[tuple[str, float]]:
     """
-    Run hybrid search across ALL selected collections and merge into one
-    globally-ranked list.
+    Full two-stage fusion: Ensemble Combiner → RRF Stability Layer.
 
     Args:
-        per_collection_semantic: {collection: [(text, score), ...]}
-        query:                   rewritten query string
+        per_collection_semantic: {collection: [(text, semantic_score), ...]}
+                                  Results from Qdrant vector search (post-threshold).
+        query:                    Rewritten search query (used for BM25 search).
 
     Returns:
-        [(text, rrf_score), ...] global ranking, capped to FINAL_TOP_K
+        [(text, final_score), ...] globally ranked and capped to FINAL_TOP_K.
     """
-    all_fused: list[tuple[str, float]] = []
+    selected = list(per_collection_semantic.keys())
 
-    for collection, semantic_hits in per_collection_semantic.items():
-        col_results = hybrid_search_collection(collection, query, semantic_hits)
-        all_fused.extend(col_results)
+    # ── BM25 independent search across all collections ───────────────────────
+    per_collection_bm25 = _bm25_search_all(selected, query)
 
-    # Global RRF — deduplicate across collections by text identity,
-    # keeping the highest RRF score when the same chunk appears in multiple collections
-    deduped: dict[str, float] = {}
-    for text, score in all_fused:
-        if text not in deduped or score > deduped[text]:
-            deduped[text] = score
+    total_bm25 = sum(len(h) for h in per_collection_bm25.values())
+    total_sem = sum(len(h) for h in per_collection_semantic.values())
+    logger.info(
+        "Fusion input: semantic=%d docs, BM25=%d docs across %d collections",
+        total_sem, total_bm25, len(selected),
+    )
 
-    ranked = sorted(deduped.items(), key=lambda x: x[1], reverse=True)
-    return ranked[:FINAL_TOP_K]
+    # ── Stage 1: Weighted Ensemble Combination ───────────────────────────────
+    ensemble_results = ensemble_combine_multi_collection(
+        per_collection_semantic=per_collection_semantic,
+        per_collection_bm25=per_collection_bm25,
+        top_k=FINAL_TOP_K * 2,   # give RRF stage more candidates to work with
+    )
+
+    if not ensemble_results:
+        # Both legs returned nothing
+        logger.warning("Ensemble returned 0 results — both retrieval legs empty")
+        return []
+
+    # ── Stage 2: RRF Stability Layer ─────────────────────────────────────────
+    final = _rrf_stability(ensemble_results)
+    final.sort(key=lambda x: x[1], reverse=True)
+    final = final[:FINAL_TOP_K]
+
+    logger.info(
+        "Fusion complete: %d final docs | top=%.6f | bottom=%.6f",
+        len(final),
+        final[0][1] if final else 0,
+        final[-1][1] if final else 0,
+    )
+    return final

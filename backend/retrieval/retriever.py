@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 # Cosine similarity threshold — chunks below this score are discarded BEFORE
 # they reach the hybrid fusion stage.  This is the primary guard against
 # "garbage-in → hallucination-out".
-MIN_SCORE: float = 0.35
+# Set to 0.20 — real document chunks score 0.60+ even for vague queries;
+# 0.20 filters true irrelevant noise while allowing general questions through.
+MIN_SCORE: float = 0.20
 
 # How many vector candidates to pull per collection (before threshold filter)
 VECTOR_FETCH_K: int = 12
@@ -58,16 +60,27 @@ def rewrite_query(question: str) -> str:
     """Use Gemini to rewrite the user question into a better search query."""
     try:
         prompt = (
-            "Rewrite the following question into ONE clear standalone search query.\n\n"
-            "Return ONLY the rewritten query. Do NOT explain. Do NOT give options.\n\n"
-            f"Question: {question}"
+            "Your task: rewrite the user's question into ONE clear, specific, "
+            "standalone search query optimized for vector similarity search.\n\n"
+            "Rules:\n"
+            "- If the question is vague (e.g. 'tell me about the pdf', 'what is this about'), "
+            "expand it into a more specific information-seeking query.\n"
+            "- If it references 'the pdf', 'the document', 'the file', treat it as asking "
+            "for a general overview or summary of the document content.\n"
+            "- Remove filler words. Keep domain-specific terms.\n"
+            "- Return ONLY the rewritten query. No explanation.\n\n"
+            f"Question: {question}\n"
+            "Rewritten search query:"
         )
         response = llm.invoke(prompt)
         rewritten = response.content.strip()
+        # Strip any quotes Gemini may wrap around the response
+        rewritten = rewritten.strip('"\'')
         if rewritten and len(rewritten) > 3:
+            logger.debug("Query rewritten: '%s' -> '%s'", question[:60], rewritten[:60])
             return rewritten
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Query rewrite failed: %s", e)
     return question
 
 

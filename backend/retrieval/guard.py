@@ -3,14 +3,27 @@ Hallucination Guard Module
 --------------------------
 Analyses the quality of retrieved context BEFORE it reaches the LLM.
 Provides two things:
-  1. A confidence level ("high" / "low" / "none") based on average retrieval scores.
-  2. A system advisory note that is injected into the prompt so the LLM
-     knows to be more conservative when the context is weak.
+  1. A confidence level ("high" / "low" / "none") based on retrieval scores.
+  2. A system advisory note injected into the prompt so the LLM knows how
+     confident to be.
+
+IMPORTANT — Score scale awareness:
+  Raw cosine scores: 0.0 – 1.0
+  RRF fused scores:  0.01 – 0.033  (much smaller, purely rank-based)
+  The guard auto-detects which scale is being used and applies the
+  correct threshold so confidence is never mis-classified.
 """
 
-# Minimum average score for "high" confidence retrieval.
-# Below this threshold the LLM is explicitly warned to be conservative.
-CONFIDENCE_THRESHOLD = 0.45
+# Thresholds for raw cosine scores (0-1 range)
+COSINE_CONFIDENCE_THRESHOLD: float = 0.40
+COSINE_HIGH_MAX: float = 0.50
+
+# Thresholds for RRF fused scores (0.01-0.033 range)
+RRF_CONFIDENCE_THRESHOLD: float = 0.018
+RRF_HIGH_MAX: float = 0.025
+
+# If max score is below this value, treat as RRF scores
+RRF_SCALE_CUTOFF: float = 0.10
 
 
 def assess_confidence(docs_with_scores: list[tuple[str, float]]) -> tuple[str, str]:
@@ -19,6 +32,7 @@ def assess_confidence(docs_with_scores: list[tuple[str, float]]) -> tuple[str, s
 
     Args:
         docs_with_scores: list of (text, score) tuples from the retriever.
+                          Scores can be cosine similarities OR RRF fused scores.
 
     Returns:
         (confidence_level, advisory_note) where:
@@ -34,10 +48,16 @@ def assess_confidence(docs_with_scores: list[tuple[str, float]]) -> tuple[str, s
             "question accurately.' Do not attempt to answer from general knowledge.]",
         )
 
-    avg_score = sum(score for _, score in docs_with_scores) / len(docs_with_scores)
-    max_score = max(score for _, score in docs_with_scores)
+    scores = [s for _, s in docs_with_scores]
+    avg_score = sum(scores) / len(scores)
+    max_score = max(scores)
 
-    if avg_score >= CONFIDENCE_THRESHOLD or max_score >= 0.60:
+    # Auto-detect score scale: RRF scores are always < 0.10
+    is_rrf = max_score < RRF_SCALE_CUTOFF
+    conf_threshold = RRF_CONFIDENCE_THRESHOLD if is_rrf else COSINE_CONFIDENCE_THRESHOLD
+    high_max = RRF_HIGH_MAX if is_rrf else COSINE_HIGH_MAX
+
+    if avg_score >= conf_threshold or max_score >= high_max:
         return (
             "high",
             "[RETRIEVAL CONFIDENCE: HIGH — The retrieved context is directly relevant. "
@@ -46,10 +66,10 @@ def assess_confidence(docs_with_scores: list[tuple[str, float]]) -> tuple[str, s
     else:
         return (
             "low",
-            f"[RETRIEVAL CONFIDENCE: LOW — Average relevance score is {avg_score:.2f}, "
-            "which is below the confidence threshold. The retrieved context may not be "
-            "directly relevant to this question. You MUST be extremely conservative: "
+            f"[RETRIEVAL CONFIDENCE: LOW — Average relevance score is {avg_score:.4f}. "
+            "The retrieved context may not be directly relevant. Be extremely conservative: "
             "only state what is explicitly present in the context, and clearly "
-            "acknowledge any uncertainty. Do NOT infer, extrapolate, or add information "
-            "from your general training knowledge.]",
+            "acknowledge any uncertainty. Do NOT infer or add information from general "
+            "training knowledge.]",
         )
+
