@@ -195,20 +195,16 @@ export default function Home() {
     if (file) handleUpload(file);
   };
 
-  const formatTime = (date: Date) => {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  };
-
   // ── Inline markdown renderer (no extra packages) ──────────────────────────
   const renderInline = (text: string): React.ReactNode => {
     const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/);
     return parts.map((part, i) => {
       if (part.startsWith('**') && part.endsWith('**') && part.length > 4)
-        return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
+        return <strong key={i} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
       if (part.startsWith('*') && part.endsWith('*') && part.length > 2)
-        return <em key={i}>{part.slice(1, -1)}</em>;
+        return <em key={i} className="italic text-white opacity-80">{part.slice(1, -1)}</em>;
       if (part.startsWith('`') && part.endsWith('`') && part.length > 2)
-        return <code key={i} className="bg-black/10 px-1 py-0.5 rounded text-[0.8em] font-mono">{part.slice(1, -1)}</code>;
+        return <code key={i} className="bg-[var(--color-surface-hover)] border border-[var(--color-border)] px-1.5 py-0.5 rounded text-[0.85em] font-mono text-white">{part.slice(1, -1)}</code>;
       return part;
     });
   };
@@ -223,12 +219,12 @@ export default function Home() {
       if (!listBuf.items.length) return;
       const Tag = listBuf.type;
       const cls = Tag === 'ul'
-        ? 'list-disc list-outside ml-4 my-2 space-y-1'
-        : 'list-decimal list-outside ml-4 my-2 space-y-1';
+        ? 'list-disc list-outside ml-5 my-2 space-y-1.5 text-white'
+        : 'list-decimal list-outside ml-5 my-2 space-y-1.5 text-white';
       output.push(
         <Tag key={`list-${key}`} className={cls}>
           {listBuf.items.map((item, j) => (
-            <li key={j} className="text-sm leading-relaxed pl-1">{renderInline(item)}</li>
+            <li key={j} className="text-[15px] leading-relaxed pl-1 text-white">{renderInline(item)}</li>
           ))}
         </Tag>
       );
@@ -236,15 +232,15 @@ export default function Home() {
     };
 
     lines.forEach((line, idx) => {
-      // H2
+      // H2 - Main Headings: Dark Green
       if (/^## /.test(line)) {
         flushList(idx);
-        output.push(<h2 key={idx} className="text-sm font-bold mt-3 mb-1 text-[var(--color-text)]">{renderInline(line.slice(3))}</h2>);
+        output.push(<h2 key={idx} className="text-xl font-bold mt-6 mb-3 text-[var(--color-primary)] pb-1">{renderInline(line.slice(3))}</h2>);
       }
-      // H3
+      // H3 - Subheadings: White
       else if (/^### /.test(line)) {
         flushList(idx);
-        output.push(<h3 key={idx} className="text-sm font-semibold mt-2 mb-0.5 text-[var(--color-text)]">{renderInline(line.slice(4))}</h3>);
+        output.push(<h3 key={idx} className="text-base font-semibold mt-4 mb-2 text-white">{renderInline(line.slice(4))}</h3>);
       }
       // Bullet
       else if (/^[-*] /.test(line)) {
@@ -261,52 +257,48 @@ export default function Home() {
       // Empty line
       else if (!line.trim()) {
         flushList(idx);
-        if (idx > 0 && lines[idx - 1].trim()) output.push(<div key={idx} className="h-2" />);
+        if (idx > 0 && lines[idx - 1].trim()) output.push(<div key={idx} className="h-3" />);
       }
       // Paragraph
       else {
         flushList(idx);
-        output.push(<p key={idx} className="text-sm leading-relaxed">{renderInline(line)}</p>);
+        output.push(<p key={idx} className="text-[15px] leading-relaxed text-white mb-3">{renderInline(line)}</p>);
       }
     });
     flushList(lines.length);
-    return <div className="space-y-0.5">{output}</div>;
+    return <div className="space-y-1">{output}</div>;
   };
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-background)]">
-
       {/* ═══ Sidebar ═══ */}
       <aside
-        className={`${showSidebar ? "w-72" : "w-0"} transition-all duration-300 overflow-hidden flex-shrink-0`}
+        className={`${showSidebar ? "w-64" : "w-0"} transition-all duration-300 overflow-hidden flex-shrink-0 bg-[var(--color-surface)] border-r border-[var(--color-border)]`}
       >
-        <div className="w-72 h-full flex flex-col bg-[var(--color-surface)] border-r border-[var(--color-border)]"
-          style={{ boxShadow: "var(--shadow-sm)" }}>
-
+        <div className="w-64 h-full flex flex-col">
           {/* Brand */}
-          <div className="p-5 border-b border-[var(--color-border)]">
+          <div className="p-4 border-b border-[var(--color-border)]">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[var(--color-primary)] flex items-center justify-center"
-                style={{ boxShadow: "0 2px 8px rgba(13, 148, 136, 0.2)" }}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <div className="w-8 h-8 rounded-lg bg-[var(--color-primary)] flex items-center justify-center">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
               <div>
-                <h1 className="text-sm font-semibold text-[var(--color-text)]">RAG Assistant</h1>
-                <p className="text-xs text-[var(--color-text-muted)]">Multi-Source AI</p>
+                <h1 className="text-sm font-semibold text-[var(--color-primary)]">RAG Assistant</h1>
+                <p className="text-[11px] text-white">Enterprise RAG</p>
               </div>
             </div>
           </div>
 
           {/* Actions */}
-          <div className="p-4 space-y-1.5">
+          <div className="p-3 space-y-1.5">
             <button
               onClick={() => {
                 setMessages([]);
                 handleClearMemory();
               }}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg border border-[var(--color-border)] hover:bg-[var(--color-surface-hover)] transition-all text-sm font-medium text-[var(--color-text)]"
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md hover:bg-[var(--color-surface-hover)] transition-colors text-sm font-medium text-white"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -316,7 +308,11 @@ export default function Home() {
 
             <button
               onClick={() => setShowUpload(!showUpload)}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg hover:bg-[var(--color-surface-hover)] transition-all text-sm text-[var(--color-text-secondary)]"
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors text-sm font-medium ${
+                showUpload
+                  ? "bg-[var(--color-surface-hover)] text-white"
+                  : "hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
+              }`}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
@@ -327,12 +323,12 @@ export default function Home() {
 
           {/* Upload Zone */}
           {showUpload && (
-            <div className="px-4 pb-4 animate-fade-in">
+            <div className="px-3 pb-3 animate-fade-in">
               <div
                 onDrop={handleDrop}
                 onDragOver={(e) => e.preventDefault()}
                 onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-[var(--color-border)] rounded-xl p-6 text-center cursor-pointer hover:border-[var(--color-primary)] hover:bg-[var(--color-primary-light)] transition-all"
+                className="border border-dashed border-[var(--color-border-hover)] rounded-lg p-4 text-center cursor-pointer hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-colors"
               >
                 <input
                   ref={fileInputRef}
@@ -345,23 +341,23 @@ export default function Home() {
                   }}
                 />
                 {isUploading ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" />
-                    <p className="text-xs text-[var(--color-text-muted)]">Processing...</p>
+                  <div className="flex flex-col items-center gap-2 py-1">
+                    <div className="w-5 h-5 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" />
+                    <p className="text-[11px] text-[var(--color-text-muted)]">Processing...</p>
                   </div>
                 ) : (
-                  <>
-                    <svg className="mx-auto mb-2 text-[var(--color-text-dim)]" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <div className="py-1">
+                    <svg className="mx-auto mb-1.5 text-[var(--color-text-muted)]" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="12" y1="18" x2="12" y2="12" /><line x1="9" y1="15" x2="15" y2="15" />
                     </svg>
-                    <p className="text-xs text-[var(--color-text-muted)]">
-                      Drop PDF here or click to browse
+                    <p className="text-[11px] text-[var(--color-text-secondary)]">
+                      Drop PDF or click
                     </p>
-                  </>
+                  </div>
                 )}
               </div>
               {uploadStatus && (
-                <div className="mt-2 px-3 py-2 rounded-lg bg-[var(--color-surface-hover)] text-xs text-center text-[var(--color-text-secondary)]">
+                <div className="mt-2 px-2 py-1.5 rounded-md bg-[var(--color-surface-hover)] text-[10px] text-center text-white break-words">
                   {uploadStatus}
                 </div>
               )}
@@ -369,89 +365,113 @@ export default function Home() {
           )}
 
           {/* Collections */}
-          <div className="flex-1 overflow-y-auto px-4 pb-4">
-            <p className="text-xs font-semibold text-[var(--color-text-dim)] uppercase tracking-wider mb-3">
-              Knowledge Sources
+          <div className="flex-1 overflow-y-auto px-3 pb-4">
+            <p className="text-[11px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2 px-1 mt-2">
+              Knowledge Base
             </p>
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               {collections.map((col) => (
                 <div
                   key={col.name}
-                  className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-[var(--color-background)] text-sm transition-colors hover:bg-[var(--color-surface-hover)]"
+                  className="flex items-center justify-between px-2 py-1.5 rounded-md hover:bg-[var(--color-surface-hover)] text-sm transition-colors cursor-default"
                 >
-                  <span className="text-[var(--color-text-secondary)] truncate capitalize">
+                  <span className="text-[13px] text-white truncate capitalize flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-primary)] opacity-80" />
                     {col.name.replace(/_/g, " ")}
                   </span>
-                  <span
-                    className={`text-xs font-mono px-1.5 py-0.5 rounded ${col.points_count > 0
-                      ? "text-[var(--color-success)] bg-emerald-50"
-                      : "text-[var(--color-text-dim)] bg-gray-50"
-                      }`}
-                  >
+                  <span className="text-[10px] text-[var(--color-text-dim)] font-mono">
                     {col.points_count}
                   </span>
                 </div>
               ))}
               {collections.length === 0 && (
-                <p className="text-xs text-[var(--color-text-dim)] italic px-3 py-2">
-                  Loading collections...
+                <p className="text-[12px] text-[var(--color-text-dim)] px-2 py-1">
+                  No collections
                 </p>
               )}
-            </div>
-          </div>
-
-          {/* Footer */}
-          <div className="p-4 border-t border-[var(--color-border)]">
-            <div className="flex items-center gap-2 text-xs text-[var(--color-text-dim)]">
-              <div className="w-2 h-2 rounded-full bg-[var(--color-success)] animate-subtle-pulse" />
-              Gemini 2.5 Flash · Qdrant
             </div>
           </div>
         </div>
       </aside>
 
       {/* ═══ Main Chat Area ═══ */}
-      <main className="flex-1 flex flex-col min-w-0">
-
+      <main className="flex-1 flex flex-col min-w-0 bg-[var(--color-background)]">
         {/* Header */}
-        <header className="flex items-center gap-3 px-5 py-3.5 border-b border-[var(--color-border)] bg-[var(--color-surface)]"
-          style={{ boxShadow: "var(--shadow-sm)" }}>
-          <button
-            onClick={() => setShowSidebar(!showSidebar)}
-            className="p-2 rounded-lg hover:bg-[var(--color-surface-hover)] transition-colors"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-            </svg>
-          </button>
-          <div className="flex-1">
-            <h2 className="text-sm font-semibold text-[var(--color-text)]">Multi-Source RAG Chat</h2>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[var(--color-text-dim)] bg-[var(--color-background)] px-2.5 py-1 rounded-full">
-              {messages.filter((m) => m.role === "user").length} messages
-            </span>
+        <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowSidebar(!showSidebar)}
+              className="p-1.5 rounded-md hover:bg-[var(--color-surface-hover)] transition-colors text-[var(--color-text-muted)] hover:text-white"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            </button>
+            <h2 className="text-sm font-medium text-[var(--color-primary)]">Agentic RAG Assistant</h2>
           </div>
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-6">
+        <div className="flex-1 overflow-y-auto">
           {messages.length === 0 ? (
             /* ── Empty State ── */
-            <div className="flex flex-col items-center justify-center h-full text-center max-w-lg mx-auto">
-              <div className="w-16 h-16 rounded-2xl bg-[var(--color-primary)] flex items-center justify-center mb-6"
-                style={{ boxShadow: "0 4px 16px rgba(13, 148, 136, 0.15)" }}>
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.5">
-                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+            <div className="flex flex-col items-center justify-center h-full text-center max-w-3xl mx-auto px-4">
+              <div className="w-12 h-12 rounded-xl bg-[var(--color-surface)] border border-[var(--color-border)] flex items-center justify-center mb-6 shadow-sm">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
                 </svg>
               </div>
-              <h2 className="text-xl font-semibold text-[var(--color-text)] mb-2">
-                Multi-Source RAG Assistant
+              
+              <h2 className="text-2xl font-bold text-[var(--color-primary)] mb-3">
+                How can I assist your research?
               </h2>
-              <p className="text-sm text-[var(--color-text-muted)] mb-8 leading-relaxed">
-                Upload PDFs and ask questions. I&apos;ll search across your knowledge sources to find the best answers.
+              <p className="text-base text-white mb-10">
+                Ask questions or upload documents. I search across multiple specialized knowledge bases to find precise answers.
               </p>
-              <div className="grid grid-cols-2 gap-3 w-full">
+
+              {/* 4 Types of Knowledge Base Info Section */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 w-full mb-10">
+                <div className="flex flex-col items-center p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2" className="mb-3">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  </svg>
+                  <span className="text-[12px] font-semibold text-[var(--color-primary)] uppercase tracking-wide">Research Papers</span>
+                  <span className="text-[11px] text-white mt-1 text-center">Academic & Arxiv docs</span>
+                </div>
+                
+                <div className="flex flex-col items-center p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2" className="mb-3">
+                    <ellipse cx="12" cy="5" rx="9" ry="3" />
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                  </svg>
+                  <span className="text-[12px] font-semibold text-[var(--color-primary)] uppercase tracking-wide">Knowledge Base</span>
+                  <span className="text-[11px] text-white mt-1 text-center">General information</span>
+                </div>
+
+                <div className="flex flex-col items-center p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2" className="mb-3">
+                    <polyline points="16 18 22 12 16 6" />
+                    <polyline points="8 6 2 12 8 18" />
+                  </svg>
+                  <span className="text-[12px] font-semibold text-[var(--color-primary)] uppercase tracking-wide">Code Docs</span>
+                  <span className="text-[11px] text-white mt-1 text-center">API & Documentation</span>
+                </div>
+
+                <div className="flex flex-col items-center p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2" className="mb-3">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  <span className="text-[12px] font-semibold text-[var(--color-primary)] uppercase tracking-wide">FAQ Data</span>
+                  <span className="text-[11px] text-white mt-1 text-center">Help & Guides</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-xl mx-auto">
                 {[
                   "Explain how attention works in transformers",
                   "What is the architecture of the encoder?",
@@ -464,7 +484,7 @@ export default function Home() {
                       setInput(q);
                       inputRef.current?.focus();
                     }}
-                    className="text-left text-xs p-3.5 rounded-xl border border-[var(--color-border)] hover:border-[var(--color-primary)] hover:bg-[var(--color-primary-light)] transition-all text-[var(--color-text-secondary)] leading-relaxed"
+                    className="text-left text-[14px] p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] transition-colors text-white leading-relaxed"
                   >
                     {q}
                   </button>
@@ -473,102 +493,92 @@ export default function Home() {
             </div>
           ) : (
             /* ── Chat Messages ── */
-            <div className="max-w-3xl mx-auto space-y-5">
+            <div className="max-w-3xl mx-auto w-full px-4 py-8 space-y-8">
               {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex gap-3 animate-fade-in ${msg.role === "user" ? "justify-end" : "justify-start"
-                    }`}
-                >
-                  {/* Assistant Avatar */}
-                  {msg.role === "assistant" && (
-                    <div className="w-8 h-8 rounded-lg bg-[var(--color-primary)] flex items-center justify-center flex-shrink-0 mt-0.5"
-                      style={{ boxShadow: "0 1px 4px rgba(13, 148, 136, 0.15)" }}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-                        <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
-                      </svg>
-                    </div>
-                  )}
-
-                  {/* Message Bubble */}
-                  <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${msg.role === "user"
-                      ? "bg-[var(--color-primary)] text-white rounded-br-md"
-                      : "bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] rounded-bl-md"
-                      }`}
-                    style={msg.role === "assistant" ? { boxShadow: "var(--shadow-sm)" } : { boxShadow: "0 1px 4px rgba(13, 148, 136, 0.15)" }}
-                  >
+                <div key={msg.id} className="flex gap-4 animate-fade-in w-full">
+                  {/* Avatar */}
+                  <div className="w-8 h-8 rounded-md flex-shrink-0 flex items-center justify-center mt-1">
                     {msg.role === "assistant" ? (
-                      msg.content
-                        ? renderMarkdown(msg.content)
-                        : (
-                          <div className="flex items-center gap-1.5 py-1">
+                      <div className="w-full h-full bg-[var(--color-primary)] rounded-md flex items-center justify-center">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
+                          <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
+                        </svg>
+                      </div>
+                    ) : (
+                      <div className="w-full h-full bg-[var(--color-surface-hover)] rounded-md flex items-center justify-center border border-[var(--color-border)]">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-[var(--color-text-secondary)]">
+                          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Message Content */}
+                  <div className="flex-1 min-w-0 pt-1.5">
+                    <div className="font-medium text-sm text-[var(--color-primary)] mb-1">
+                      {msg.role === "assistant" ? "RAG Assistant" : "You"}
+                    </div>
+                    <div className={`text-[15px] leading-relaxed text-white`}>
+                      {msg.role === "assistant" ? (
+                        msg.content ? (
+                          renderMarkdown(msg.content)
+                        ) : (
+                          <div className="flex items-center gap-1.5 h-6">
                             <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
                             <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
                             <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
                           </div>
                         )
-                    ) : (
-                      msg.content
-                    )}
-                  </div>
-
-                  {/* User Avatar */}
-                  {msg.role === "user" && (
-                    <div className="w-8 h-8 rounded-lg bg-[var(--color-surface-active)] flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-muted)" strokeWidth="2">
-                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
-                      </svg>
+                      ) : (
+                        msg.content
+                      )}
                     </div>
-                  )}
+                  </div>
                 </div>
               ))}
-              <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} className="h-4" />
             </div>
           )}
         </div>
 
         {/* ── Input Area ── */}
-        <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface)]">
-          <div className="max-w-3xl mx-auto">
-            <div className="flex items-end gap-3 bg-[var(--color-background)] border border-[var(--color-border)] rounded-2xl px-4 py-3 focus-within:border-[var(--color-primary)] transition-colors"
-              style={{ boxShadow: "var(--shadow-sm)" }}>
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask about your documents..."
-                rows={1}
-                className="flex-1 bg-transparent outline-none resize-none text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-dim)] max-h-32"
-                style={{
-                  height: "auto",
-                  minHeight: "24px",
-                }}
-                onInput={(e) => {
-                  const target = e.target as HTMLTextAreaElement;
-                  target.style.height = "auto";
-                  target.style.height = Math.min(target.scrollHeight, 128) + "px";
-                }}
-              />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || isLoading}
-                className="flex-shrink-0 w-9 h-9 rounded-xl bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all"
-              >
-                {isLoading ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-                  </svg>
-                )}
-              </button>
-            </div>
-            <p className="text-center text-xs text-[var(--color-text-dim)] mt-2.5">
-              Powered by Gemini 2.5 Flash · Hybrid Vector + BM25 Retrieval · Qdrant Cloud
-            </p>
+        <div className="p-4 mx-auto max-w-3xl w-full">
+          <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl px-4 py-3 focus-within:border-[var(--color-border-hover)] transition-colors shadow-sm flex items-end gap-3">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask a question..."
+              rows={1}
+              className="flex-1 bg-transparent outline-none resize-none text-[15px] text-white placeholder:text-[var(--color-text-muted)] max-h-32 py-0.5"
+              style={{
+                height: "auto",
+                minHeight: "24px",
+              }}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement;
+                target.style.height = "auto";
+                target.style.height = Math.min(target.scrollHeight, 128) + "px";
+              }}
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || isLoading}
+              className="flex-shrink-0 w-8 h-8 rounded-lg bg-[var(--color-primary)] disabled:bg-[var(--color-surface-hover)] disabled:text-[var(--color-text-muted)] text-white flex items-center justify-center transition-colors disabled:cursor-not-allowed"
+            >
+              {isLoading ? (
+                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+                </svg>
+              )}
+            </button>
           </div>
+          <p className="text-center text-[11px] text-[var(--color-text-dim)] mt-3">
+            AI can make mistakes. Check important info.
+          </p>
         </div>
       </main>
     </div>

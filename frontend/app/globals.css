@@ -1,46 +1,43 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Clean Light Professional Palette ── */
-  --color-background: #f8f9fb;
-  --color-surface: #ffffff;
-  --color-surface-hover: #f1f3f5;
-  --color-surface-active: #e9ecef;
-  --color-border: #e2e5ea;
-  --color-border-focus: #339988;
+  /* ── Professional Charcoal Dark Theme ── */
+  --color-background: #0f0f0f;
+  --color-surface: #171717;
+  --color-surface-hover: #262626;
+  --color-surface-active: #333333;
+  --color-border: #2d2d2d;
+  --color-border-hover: #404040;
+  --color-border-focus: #0d9488;
 
-  /* Primary — Professional Teal */
+  /* Primary — Original Teal/Dark Green */
   --color-primary: #0d9488;
   --color-primary-hover: #0f766e;
-  --color-primary-light: rgba(13, 148, 136, 0.08);
+  --color-primary-light: rgba(13, 148, 136, 0.15);
 
-  /* Accent — Warm Amber for highlights */
-  --color-accent: #f59e0b;
-  --color-accent-light: rgba(245, 158, 11, 0.1);
+  /* Typography */
+  --color-text: #ffffff;
+  --color-text-secondary: #a3a3a3;
+  --color-text-muted: #737373;
+  --color-text-dim: #525252;
 
-  /* Text */
-  --color-text: #1e293b;
-  --color-text-secondary: #475569;
-  --color-text-muted: #64748b;
-  --color-text-dim: #94a3b8;
-
-  /* Status */
+  /* Status Colors */
   --color-success: #10b981;
   --color-error: #ef4444;
   --color-warning: #f59e0b;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
+  /* Drop Shadows - clean, no glows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
 
-  /* Typography */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
 @layer base {
   * {
     box-sizing: border-box;
+    border-color: var(--color-border);
   }
 
   body {
@@ -49,11 +46,13 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
   }
 
-  /* Scrollbar — subtle light style */
+  /* Custom Webkit scrollbar for premium dark feel */
   ::-webkit-scrollbar {
     width: 6px;
+    height: 6px;
   }
 
   ::-webkit-scrollbar-track {
@@ -61,22 +60,21 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #d1d5db;
-    border-radius: 3px;
+    background: var(--color-border-hover);
+    border-radius: 4px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #9ca3af;
+    background: var(--color-text-muted);
   }
 }
 
-/* ── Animations ── */
+/* ── Custom Animations & Effects ── */
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(8px);
   }
-
   to {
     opacity: 1;
     transform: translateY(0);
@@ -86,9 +84,8 @@
 @keyframes slideIn {
   from {
     opacity: 0;
-    transform: translateX(-8px);
+    transform: translateX(-12px);
   }
-
   to {
     opacity: 1;
     transform: translateX(0);
@@ -96,42 +93,22 @@
 }
 
 @keyframes typing-dot {
-
-  0%,
-  60%,
-  100% {
+  0%, 60%, 100% {
     opacity: 0.3;
     transform: translateY(0);
   }
-
   30% {
     opacity: 1;
-    transform: translateY(-3px);
-  }
-}
-
-@keyframes subtle-pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.6;
+    transform: translateY(-4px);
   }
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.3s ease-out forwards;
+  animation: fadeIn 0.2s ease-out forwards;
 }
 
 .animate-slide-in {
-  animation: slideIn 0.3s ease-out forwards;
-}
-
-.animate-subtle-pulse {
-  animation: subtle-pulse 2s ease-in-out infinite;
+  animation: slideIn 0.2s ease-out forwards;
 }
 
 .typing-dot:nth-child(1) {
