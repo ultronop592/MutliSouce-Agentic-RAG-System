@@ -199,6 +199,80 @@ export default function Home() {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
+  // ── Inline markdown renderer (no extra packages) ──────────────────────────
+  const renderInline = (text: string): React.ReactNode => {
+    const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/);
+    return parts.map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**') && part.length > 4)
+        return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
+      if (part.startsWith('*') && part.endsWith('*') && part.length > 2)
+        return <em key={i}>{part.slice(1, -1)}</em>;
+      if (part.startsWith('`') && part.endsWith('`') && part.length > 2)
+        return <code key={i} className="bg-black/10 px-1 py-0.5 rounded text-[0.8em] font-mono">{part.slice(1, -1)}</code>;
+      return part;
+    });
+  };
+
+  const renderMarkdown = (text: string): React.ReactNode => {
+    if (!text) return null;
+    const lines = text.split('\n');
+    const output: React.ReactNode[] = [];
+    const listBuf: { type: 'ul' | 'ol'; items: string[] } = { type: 'ul', items: [] };
+
+    const flushList = (key: number) => {
+      if (!listBuf.items.length) return;
+      const Tag = listBuf.type;
+      const cls = Tag === 'ul'
+        ? 'list-disc list-outside ml-4 my-2 space-y-1'
+        : 'list-decimal list-outside ml-4 my-2 space-y-1';
+      output.push(
+        <Tag key={`list-${key}`} className={cls}>
+          {listBuf.items.map((item, j) => (
+            <li key={j} className="text-sm leading-relaxed pl-1">{renderInline(item)}</li>
+          ))}
+        </Tag>
+      );
+      listBuf.items = [];
+    };
+
+    lines.forEach((line, idx) => {
+      // H2
+      if (/^## /.test(line)) {
+        flushList(idx);
+        output.push(<h2 key={idx} className="text-sm font-bold mt-3 mb-1 text-[var(--color-text)]">{renderInline(line.slice(3))}</h2>);
+      }
+      // H3
+      else if (/^### /.test(line)) {
+        flushList(idx);
+        output.push(<h3 key={idx} className="text-sm font-semibold mt-2 mb-0.5 text-[var(--color-text)]">{renderInline(line.slice(4))}</h3>);
+      }
+      // Bullet
+      else if (/^[-*] /.test(line)) {
+        if (listBuf.type !== 'ul' && listBuf.items.length) flushList(idx);
+        listBuf.type = 'ul';
+        listBuf.items.push(line.slice(2));
+      }
+      // Numbered
+      else if (/^\d+\. /.test(line)) {
+        if (listBuf.type !== 'ol' && listBuf.items.length) flushList(idx);
+        listBuf.type = 'ol';
+        listBuf.items.push(line.replace(/^\d+\. /, ''));
+      }
+      // Empty line
+      else if (!line.trim()) {
+        flushList(idx);
+        if (idx > 0 && lines[idx - 1].trim()) output.push(<div key={idx} className="h-2" />);
+      }
+      // Paragraph
+      else {
+        flushList(idx);
+        output.push(<p key={idx} className="text-sm leading-relaxed">{renderInline(line)}</p>);
+      }
+    });
+    flushList(lines.length);
+    return <div className="space-y-0.5">{output}</div>;
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-background)]">
 
@@ -424,12 +498,18 @@ export default function Home() {
                       }`}
                     style={msg.role === "assistant" ? { boxShadow: "var(--shadow-sm)" } : { boxShadow: "0 1px 4px rgba(13, 148, 136, 0.15)" }}
                   >
-                    {msg.content || (
-                      <div className="flex items-center gap-1.5 py-1">
-                        <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
-                        <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
-                        <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
-                      </div>
+                    {msg.role === "assistant" ? (
+                      msg.content
+                        ? renderMarkdown(msg.content)
+                        : (
+                          <div className="flex items-center gap-1.5 py-1">
+                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
+                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
+                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
+                          </div>
+                        )
+                    ) : (
+                      msg.content
                     )}
                   </div>
 

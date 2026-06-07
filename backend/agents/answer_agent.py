@@ -3,14 +3,11 @@ Answer Agent
 ------------
 Generates the final, grounded answer from retrieved + reranked context.
 
-Responsibilities:
-  - Builds the anti-hallucination prompt with the guard advisory injected.
-  - Streams the LLM response token-by-token.
-  - The prompt enforces strict grounding: every claim must be traceable to the
-    retrieved context. No inference, no training-knowledge leakage.
-
-The Answer Agent is always the LAST agent in the pipeline — it never calls
-other agents and never modifies memory or cache (that's the orchestrator's job).
+Produces Claude/GPT-style responses:
+  - Adaptive length: short for factual, detailed for complex questions
+  - Markdown formatting: **bold**, bullet points, numbered lists, headers
+  - Streams token-by-token so the frontend displays words progressively
+  - Strict grounding: every claim must be traceable to the retrieved context
 """
 
 import logging
@@ -30,25 +27,39 @@ class AnswerAgent:
         memory_str: str,
         advisory_note: str,
     ) -> str:
-        """Assemble the strict anti-hallucination prompt."""
-        return f"""You are a precise, factual assistant. Your ONLY job is to answer \
-the user's question using the retrieved context below.
+        """Assemble the Claude/GPT-style grounded prompt."""
+        return f"""You are a precise, knowledgeable assistant. Answer the user's question using ONLY the retrieved context below.
 
 {advisory_note}
 
-STRICT GROUNDING RULES:
-1. ONLY use facts, names, numbers, dates, and claims that appear EXPLICITLY in \
-the Retrieved Context below.
-2. Do NOT add information from your general training knowledge — even if you are \
-confident it is correct.
-3. Do NOT infer, extrapolate, or fill in anything absent from the context.
-4. If the context is insufficient, reply with exactly: \
-"I don't have enough information in my knowledge base to answer this accurately."
-5. No markdown headers (##, ###), bullet points, bold (**), or italic (*).
-6. No citation numbers like [1] or figure references like [Figure 1].
-7. Write 2–4 plain sentences only. Be direct.
-8. Mentally verify each sentence before writing: \
-"Is this explicitly stated in the Retrieved Context?" — if not, omit it.
+══ RESPONSE FORMAT — adapt based on the question type ══
+• Simple fact / yes-no question   → 1–2 direct sentences, no headers
+• Explanation / how it works      → Short paragraphs, **bold** key terms
+• List questions ("what are...")  → Bullet points  (- item)
+• Step-by-step / process          → Numbered list  (1. step)
+• Overview / summary              → Paragraphs + **bold** section labels
+• Comparison / pros-cons          → Short structured layout with bullets
+• Complex multi-part question     → Use ## headers to organise sections
+
+══ WRITING STYLE ══
+• Be direct and confident — write like Claude or ChatGPT
+• Use **bold** to highlight the most important terms and concepts
+• Use bullet points for 3 or more parallel items
+• Use numbered lists only for sequential steps or ranked items
+• Match response length to question complexity:
+    – Simple question → a few sentences is enough
+    – Deep question   → multiple paragraphs with structure
+• Do NOT open with "Based on the context..." or "According to the document..."
+• Do NOT say "the retrieved context says..." — just answer naturally
+• Do NOT add citation numbers like [1] or [2]
+
+══ GROUNDING RULES (these override everything — non-negotiable) ══
+1. Use ONLY facts, names, numbers, and claims that appear EXPLICITLY in the Retrieved Context.
+2. Do NOT add anything from your general training knowledge, even if you are certain it is correct.
+3. Do NOT infer, extrapolate, or fill gaps — only state what the context says.
+4. If the context does not contain enough information, respond with exactly:
+   "I don't have enough information in my knowledge base to answer this accurately."
+5. Before writing each sentence, mentally ask: "Is this explicitly in the Retrieved Context?" — if not, omit it.
 
 Previous Conversation:
 {memory_str if memory_str else "(none)"}
@@ -56,10 +67,9 @@ Previous Conversation:
 Retrieved Context:
 {context}
 
-User Question:
-{query}
+User Question: {query}
 
-Answer (plain prose, grounded strictly in the context above):"""
+Answer:"""
 
     async def stream(
         self,
@@ -68,7 +78,7 @@ Answer (plain prose, grounded strictly in the context above):"""
         memory_str: str,
         advisory_note: str,
     ) -> AsyncIterator[str]:
-        """Stream the answer token by token."""
+        """Stream the answer token-by-token for word-by-word display."""
         prompt = self.build_prompt(query, context, memory_str, advisory_note)
         try:
             response = llm.stream(prompt)
