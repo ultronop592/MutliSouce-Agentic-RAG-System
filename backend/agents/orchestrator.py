@@ -52,6 +52,7 @@ class Orchestrator:
         self,
         query: str,
         session_id: str,
+        collections: list[str] | None = None,
     ) -> AsyncIterator[str]:
         """
         Main entry point.  Returns an async generator of text chunks
@@ -110,7 +111,7 @@ class Orchestrator:
         # ── Path C: FULL RETRIEVAL PIPELINE ─────────────────────────────────
 
         # Step C1: Hybrid retrieval (semantic + BM25 + RRF)
-        retrieval_result = await retrieval_agent.run_async(query)
+        retrieval_result = await retrieval_agent.run_async(query, collections=collections)
         top_docs: list[str] = retrieval_result.data.get("docs", [])
         docs_with_scores: list[tuple[str, float]] = retrieval_result.data.get("scored", [])
 

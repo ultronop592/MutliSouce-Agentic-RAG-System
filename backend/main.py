@@ -96,6 +96,8 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     question: str
     session_id: str = "default"
+    collections: list[str] | None = None
+
 
 
 class UploadResponse(BaseModel):
@@ -230,7 +232,7 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     try:
-        stream = await orchestrator.handle(question, session_id)
+        stream = await orchestrator.handle(question, session_id, request.collections)
         return StreamingResponse(stream, media_type="text/plain")
     except Exception as e:
         logger.error("Orchestrator error for session=%s: %s", session_id, e)

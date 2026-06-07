@@ -43,12 +43,13 @@ class RetrievalAgent(BaseAgent):
             metadata={"collections": collections, "doc_count": len(top_docs)},
         )
 
-    async def run_async(self, query: str) -> AgentResult:
+    async def run_async(self, query: str, collections: list[str] | None = None) -> AgentResult:
         """Async version — called by the orchestrator directly."""
         import time
         t0 = time.perf_counter()
         try:
-            collections = planner(query)
+            if collections is None:
+                collections = planner(query)
             logger.info("RetrievalAgent routing to: %s", collections)
             top_docs, docs_with_scores = await hybrid_retrieve(query, collections)
             latency = (time.perf_counter() - t0) * 1000
