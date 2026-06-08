@@ -30,9 +30,11 @@ Every agent step is timed and logged so you can trace slow requests in productio
 
 import logging
 import time
+import asyncio
 from typing import AsyncIterator
 
 from agents.router import router_agent, RouteType
+from agents.verification_agent import verification_agent
 from agents.memory_agent import memory_agent
 from agents.retrieval_agent import retrieval_agent
 from agents.reranker import reranker_agent
@@ -141,14 +143,59 @@ class Orchestrator:
         # Step C5: Conversation memory for context
         memory_str = chat_memory.format_history(session_id)
 
-        # Step C6: Stream answer
+        # Step C6: Verified Answer Generation & Self-Correction Loop
         full_response = ""
 
         async def _retrieval_stream() -> AsyncIterator[str]:
             nonlocal full_response
-            async for chunk in answer_agent.stream(query, context, memory_str, advisory_note):
-                full_response += chunk
+            
+            # Generate initial answer candidate in memory
+            answer_candidate = await answer_agent.generate(query, context, memory_str, advisory_note)
+            
+            # Run verification loop
+            max_retries = 2
+            attempts = 0
+            feedback = ""
+            verified = False
+            
+            while attempts < max_retries:
+                attempts += 1
+                logger.info("VerificationAgent: check attempt %d for query='%s'", attempts, query[:50])
+                
+                check = await verification_agent.verify_async(answer_candidate, context)
+                status = check.get("status")
+                
+                if status == "verified":
+                    verified = True
+                    logger.info("VerificationAgent: check PASSED on attempt %d", attempts)
+                    break
+                elif status == "failed":
+                    feedback = check.get("reason", "")
+                    logger.warning("VerificationAgent: check FAILED on attempt %d: %s. Triggering self-correction...", attempts, feedback)
+                    
+                    # Regenerate with correction feedback passed to the LLM
+                    answer_candidate = await answer_agent.generate(
+                        query, context, memory_str, advisory_note, feedback=feedback
+                    )
+                else:
+                    # Error state (e.g. network timeout or API error) — proceed to avoid blocking user flow
+                    logger.warning("VerificationAgent: check errored: %s. Bypassing verification.", check.get("reason"))
+                    verified = True
+                    break
+            
+            if not verified:
+                logger.error("VerificationAgent: check failed after max retries. Serving best candidate.")
+            
+            final_answer = answer_candidate
+            full_response = final_answer
+
+            # Stream the final verified answer progressively (typing effect)
+            chunk_size = 12
+            for i in range(0, len(final_answer), chunk_size):
+                chunk = final_answer[i : i + chunk_size]
                 yield chunk
+                await asyncio.sleep(0.005) # fast, smooth progressive typing effect
+                
             # Post-stream: update memory and cache
             if full_response and "[Error" not in full_response:
                 chat_memory.update(
@@ -157,10 +204,11 @@ class Orchestrator:
                 )
                 if question_embedding:
                     response_cache.set(question_embedding, full_response)
+            
             total_ms = (time.perf_counter() - t_start) * 1000
             logger.info(
-                "=== Orchestrator DONE | session=%s | %.0fms | docs=%d | confidence=%s",
-                session_id, total_ms, len(reranked_docs), confidence_level,
+                "=== Orchestrator DONE | session=%s | %.0fms | docs=%d | confidence=%s | verified=%s",
+                session_id, total_ms, len(reranked_docs), confidence_level, "yes" if verified else "no",
             )
 
         return _retrieval_stream()

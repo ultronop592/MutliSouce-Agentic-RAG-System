@@ -71,6 +71,25 @@ User Question: {query}
 
 Answer:"""
 
+    async def generate(
+        self,
+        query: str,
+        context: str,
+        memory_str: str,
+        advisory_note: str,
+        feedback: str = "",
+    ) -> str:
+        """Generate the full answer in memory (non-streaming). Supports correction feedback."""
+        prompt = self.build_prompt(query, context, memory_str, advisory_note)
+        if feedback:
+            prompt += f"\n\n[Verification Correction Feedback: Your previous generation was flagged for containing ungrounded facts or discrepancies: '{feedback}'. Please rewrite the response, ensuring that it is 100% faithful to the retrieved context and resolves this issue.]"
+        try:
+            response = await llm.ainvoke(prompt)
+            return response.content.strip()
+        except Exception as e:
+            logger.error("AnswerAgent generation error: %s", e)
+            return f"[Error generating response: {e}]"
+
     async def stream(
         self,
         query: str,
@@ -88,6 +107,7 @@ Answer:"""
         except Exception as e:
             logger.error("AnswerAgent stream error: %s", e)
             yield f"\n\n[Error generating response: {e}]"
+
 
 
 # Module-level singleton
