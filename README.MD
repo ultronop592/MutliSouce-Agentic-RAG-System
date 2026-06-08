@@ -13,7 +13,7 @@ flowchart TD
     U([User Query]) --> EMB[Embed Query]
     EMB --> SC{Semantic Cache\nHit?}
     SC -->|YES| CRET([Return Cached Response\n<5ms])
-    SC -->|NO| RT[Router Agent\nClassify Query Intent]
+    SC -->|NO| RT[Router Agent\nLLM classifier + greeting prefilter]
 
     RT -->|CONVERSATIONAL| MA_C[Memory Agent\nConversational Reply]
     MA_C --> ANS_C([Direct Reply])
@@ -30,8 +30,10 @@ flowchart TD
     BS --> RRF
     RRF --> RK[Reranker Agent\nPointwise Scoring]
     RK --> GD[Hallucination Guard\nConfidence Gate]
-    GD --> AA[Answer Agent\nStrict Grounded Stream]
-    AA --> STR([Streamed Output])
+    GD --> AA[Answer Agent\nCandidate generation]
+    AA --> VA{Verification Agent\nFact-check query context}
+    VA -->|FAILED| AA
+    VA -->|VERIFIED| STR([Verified progressive stream])
     STR --> UPD[Update Memory & Cache]
 ```
 
@@ -73,7 +75,7 @@ flowchart TD
 
 ### 1. Router Agent
 Inspects incoming query syntax and intent to instantly route to one of three optimal pipelines:
-*   **CONVERSATIONAL**: Triggered on short greetings, inquiries about identity, or expressions of thanks. Bypasses database queries and routes directly to a lightweight conversational LLM wrapper to minimize resource usage.
+*   **CONVERSATIONAL**: Direct conversational path. Uses a zero-latency keyword check to instantly classify simple greetings/thanks (e.g. *"hi"*, *"thank you"*), and upgrades to a semantic Gemini intent classification prompt for complex conversational dialogue.
 *   **MEMORY_FIRST**: Detects contextual follow-ups referencing previous turn statements (*"Explain that again"*, *"What was that first point?"*). Prioritizes conversational memory retrieval.
 *   **RETRIEVAL**: Directs standard search and domain-specific queries into the retrieval pipeline.
 
@@ -101,10 +103,15 @@ Serves as the system's reliability gate. It inspects the raw cosine similarity s
 *   If the top similarity scores fail to cross the confidence threshold, the guard advises the generator to return a standard out-of-domain boundary answer (*"I do not have enough context in my database to answer this accurately"*), completely preventing contextual hallucination.
 
 ### 6. Answer Agent
-Responsible for final prose synthesis:
+Responsible for candidate answer generation:
 *   Receives the reranked context paragraphs, conversation history, and guard advisories.
-*   Employs a strict system grounding prompt to write direct answers.
-*   Streams raw character tokens to the client in real-time.
+*   Generates a full candidate response in-memory using a strict grounding template to ensure every claim is traceable to the source context.
+
+### 7. Verification Agent
+Reviews the candidate response from the Answer Agent before it is delivered to the client:
+*   **Fact-Checking**: Runs an LLM fact-checking verification, cross-referencing all statements in the candidate answer against the retrieved documents.
+*   **Self-Correction Loop**: If any hallucinations or ungrounded claims are detected, the agent returns detailed feedback. The orchestrator triggers an automatic rewrite loop (up to 2 times) with this feedback to refine the answer.
+*   **Progressive Yielding**: Once verified, the completed answer is split and progressively streamed to the client with a minor typing delay to preserve a smooth word-by-word streaming effect.
 
 ---
 
@@ -234,7 +241,8 @@ backend/
 │   ├── memory_agent.py     # State, similarity cache & conversational agent
 │   ├── retrieval_agent.py  # Planner & hybrid search agent
 │   ├── reranker.py         # Pointwise relevance reranking agent
-│   └── answer_agent.py     # Answer generation agent
+│   ├── verification_agent.py # Fact-checking & verification agent
+│   └── answer_agent.py     # Candidate answer generation agent
 ├── retrieval/
 │   ├── retriever.py        # Semantic + BM25 parallel search
 │   ├── hybrid.py           # RRF ranks fusion algorithm
