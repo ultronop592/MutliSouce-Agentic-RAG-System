@@ -318,38 +318,38 @@ export default function Home() {
     switch (tab) {
       case "research_papers":
         return [
-          "Explain how attention works in transformers",
-          "What is the architecture of the encoder?",
-          "How does multi-head attention improve performance?",
-          "Compare self-attention vs recurrence",
+          "Summarize the key findings, methodology, and contributions of this paper",
+          "What is the main problem statement and the proposed solution?",
+          "Explain the core architecture, algorithm, or experimental setup",
+          "What are the limitations or future work discussed in this paper?",
         ];
       case "knowledge_base":
         return [
-          "What are the onboarding policies for new developers?",
-          "Tell me about the corporate security guidelines",
-          "What benefits are available to full-time employees?",
-          "How do I request time off?",
+          "Provide a high-level summary of the main topics in this document",
+          "What are the key policies, procedures, or guidelines outlined?",
+          "List the roles, responsibilities, or requirements mentioned",
+          "What are the important deadlines, processes, or action items?",
         ];
       case "code_docs":
         return [
-          "Explain the API schema for the /chat route",
-          "How does the Orchestrator handle routing?",
-          "Where is the pointwise reranking script located?",
-          "How do I write a custom agent in the backend?",
+          "Summarize the main APIs, endpoints, or classes in this documentation",
+          "How do I set up, configure, or authenticate with this system?",
+          "Explain the key architectural components and data flow",
+          "Provide code examples or typical usage patterns described",
         ];
       case "faq_data":
         return [
-          "How do I troubleshoot Qdrant connection issues?",
-          "What files are supported for ingestion?",
-          "How do I clear semantic response cache?",
-          "Why am I seeing a green tint in the UI?",
+          "List the most common issues and their troubleshooting steps",
+          "What are the step-by-step instructions for standard operations?",
+          "Summarize the answers to the frequently asked questions here",
+          "What are the prerequisites or system requirements outlined?",
         ];
       default: // universal
         return [
-          "What are the latest research papers in attention mechanism?",
-          "Summarize our developer coding standard guidelines",
-          "Show me the API endpoint mapping for RAG",
-          "What should I do if ingestion fails?",
+          "Summarize the main points and key takeaways from all uploaded files",
+          "What are the key concepts and topics covered across these documents?",
+          "Identify any common themes or connections between the uploaded documents",
+          "Provide a summary of the processes and guidelines found in these materials",
         ];
     }
   };
