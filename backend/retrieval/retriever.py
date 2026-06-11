@@ -25,6 +25,7 @@ Coordinates the full retrieval pipeline:
                                                     hallucination guard
 """
 
+import os
 import asyncio
 import logging
 from core.qdrant_client import qdrant
@@ -111,7 +112,11 @@ async def _semantic_search_collection(
     """
     Vector search a single Qdrant collection.
     Applies MIN_SCORE threshold and collection confidence weighting.
-    Returns [(text, weighted_score), ...].
+    Returns [(text_with_source_header, weighted_score), ...].
+
+    Each chunk is prefixed with a [Source: filename | Page: N] header so the
+    LLM can distinguish content from different uploaded PDFs.  Without this
+    header the LLM blends chunks from unrelated documents and hallucinates.
     """
     try:
         results = qdrant.query_points(
@@ -127,7 +132,17 @@ async def _semantic_search_collection(
             if point.score < MIN_SCORE:
                 # ── Score gate: low-relevance chunk discarded ──────────────
                 continue
-            hits.append((point.payload["text"], point.score * confidence))
+
+            # ── Build source header ──────────────────────────────────────
+            raw_path = point.payload.get("source_file", "")
+            filename = os.path.basename(raw_path) if raw_path else "unknown"
+            page = point.payload.get("page", 0)
+            # Human-readable: page stored 0-indexed by PyPDFLoader → show +1
+            page_label = int(page) + 1 if isinstance(page, (int, float)) else page
+            source_header = f"[Source: {filename} | Page: {page_label}]"
+
+            chunk_text = f"{source_header}\n{point.payload['text']}"
+            hits.append((chunk_text, point.score * confidence))
         return hits
     except Exception as e:
         logger.warning("Semantic search failed for '%s': %s", collection, e)

@@ -71,8 +71,10 @@ class Orchestrator:
             logger.warning("Embedding failed: %s", e)
 
         # ── Step 2: Semantic cache check ────────────────────────────────────
+        # CRITICAL: session_id is passed so cache hits from one PDF/session
+        # NEVER bleed into a different session. See cache.py for details.
         if question_embedding:
-            cached = response_cache.get(question_embedding)
+            cached = response_cache.get(session_id, question_embedding)
             if cached:
                 logger.info("Cache HIT — returning in %.0fms", (time.perf_counter() - t_start) * 1000)
                 async def _cached_stream():
@@ -102,9 +104,9 @@ class Orchestrator:
                     (time.perf_counter() - t_start) * 1000,
                 )
                 answer = mem_result.data
-                # Cache this re-served memory answer too
+                # Cache this re-served memory answer in the same session's cache
                 if question_embedding:
-                    response_cache.set(question_embedding, answer)
+                    response_cache.set(session_id, question_embedding, answer)
                 async def _mem_stream():
                     yield answer
                 return _mem_stream()
@@ -202,8 +204,10 @@ class Orchestrator:
                     session_id, query, full_response,
                     embedding=question_embedding,
                 )
+                # Store answer in session-scoped cache so it can be reused
+                # within this session only — NOT shared across sessions.
                 if question_embedding:
-                    response_cache.set(question_embedding, full_response)
+                    response_cache.set(session_id, question_embedding, full_response)
             
             total_ms = (time.perf_counter() - t_start) * 1000
             logger.info(

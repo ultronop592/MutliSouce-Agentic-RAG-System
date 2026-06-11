@@ -29,11 +29,17 @@ from core.llm import llm
 logger = logging.getLogger(__name__)
 
 # Cosine similarity threshold for a memory cache hit.
-# 0.88 = very similar questions only (paraphrases / slight rephrasing).
-MEMORY_HIT_THRESHOLD: float = 0.88
+# CRITICAL FIX: Raised from 0.88 → 0.94.
+# 0.88 was too permissive — generic questions like "Summarize this document"
+# and "What are the key findings?" both score ~0.90 similarity even when
+# asked about completely different PDFs. At 0.94 only near-identical
+# rephrasing of the EXACT same question triggers a memory hit.
+MEMORY_HIT_THRESHOLD: float = 0.94
 
 # How many recent turns to scan (scanning all turns is unnecessary and slow)
-RECENT_TURNS_WINDOW: int = 6
+# Keep at 4: a smaller window means less chance of a stale answer from an
+# earlier document bleeding into a newer query in the same session.
+RECENT_TURNS_WINDOW: int = 4
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

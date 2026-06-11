@@ -15,8 +15,12 @@ IMPORTANT — Score scale awareness:
 """
 
 # Thresholds for raw cosine scores (0-1 range)
-COSINE_CONFIDENCE_THRESHOLD: float = 0.40
-COSINE_HIGH_MAX: float = 0.50
+# CRITICAL FIX: Raised from 0.40/0.50 → 0.45/0.60.
+# At 0.40 the LLM received weakly-matched chunks and filled the gaps using
+# its training data (hallucination). At 0.45/0.60 a "HIGH" confidence
+# classification requires genuinely relevant context.
+COSINE_CONFIDENCE_THRESHOLD: float = 0.45
+COSINE_HIGH_MAX: float = 0.60
 
 # Thresholds for RRF fused scores (0.01-0.033 range)
 RRF_CONFIDENCE_THRESHOLD: float = 0.018
@@ -67,9 +71,12 @@ def assess_confidence(docs_with_scores: list[tuple[str, float]]) -> tuple[str, s
         return (
             "low",
             f"[RETRIEVAL CONFIDENCE: LOW — Average relevance score is {avg_score:.4f}. "
-            "The retrieved context may not be directly relevant. Be extremely conservative: "
-            "only state what is explicitly present in the context, and clearly "
-            "acknowledge any uncertainty. Do NOT infer or add information from general "
-            "training knowledge.]",
+            "The retrieved context may not be directly relevant to this question. "
+            "Be extremely conservative: ONLY state facts that appear word-for-word "
+            "in the retrieved context. If you cannot find a clear answer in the "
+            "context, you MUST respond with exactly: "
+            "'I don't have enough information in my knowledge base to answer this "
+            "accurately.' Do NOT attempt to answer from your general training "
+            "knowledge under any circumstances.]",
         )
 

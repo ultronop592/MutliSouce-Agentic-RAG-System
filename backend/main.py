@@ -241,14 +241,17 @@ async def chat(request: ChatRequest):
 
 @app.delete("/memory/{session_id}")
 async def clear_memory(session_id: str):
-    """Clear conversation memory for a specific session."""
+    """Clear conversation memory AND session cache for a specific session.
+    Called by the frontend 'New Chat' button so the next conversation
+    starts completely fresh with no stale answers from the previous PDF."""
     chat_memory.clear(session_id)
-    return {"message": f"Memory cleared for session '{session_id}'"}
+    response_cache.clear(session_id)  # clear session-scoped cache too
+    return {"message": f"Memory and cache cleared for session '{session_id}'"}
 
 
 @app.delete("/memory")
 async def clear_all_memory():
-    """Clear all conversation memory and semantic response cache."""
+    """Clear ALL conversation memory and ALL session caches."""
     chat_memory.clear_all()
-    response_cache.clear()
+    response_cache.clear_all()
     return {"message": "All memory and cache cleared"}
