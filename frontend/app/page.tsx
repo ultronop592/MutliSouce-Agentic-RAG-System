@@ -25,7 +25,8 @@ interface TabState {
   showUpload: boolean;
   uploadStatus: string | null;
   isUploading: boolean;
-  docVersion: string | null;  // MD5 fingerprint of the currently active PDF
+  docVersion: string | null;      // MD5 fingerprint of the currently active PDF
+  sourceFilename: string | null;  // basename of the currently active PDF (for Qdrant filter)
 }
 
 const TABS_INFO = {
@@ -81,11 +82,11 @@ export default function Home() {
   
   // Independent states for each tab
   const [tabStates, setTabStates] = useState<Record<keyof typeof TABS_INFO, TabState>>({
-    universal: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
-    research_papers: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
-    knowledge_base: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
-    code_docs: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
-    faq_data: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
+    universal: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
+    research_papers: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
+    knowledge_base: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
+    code_docs: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
+    faq_data: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
   });
 
   const [collections, setCollections] = useState<CollectionInfo[]>([]);
@@ -178,9 +179,10 @@ export default function Home() {
           question: textToSend,
           session_id: `${activeTab}-${activeSessionId}`, // Isolate chat memory sessions per tab
           collections: targetCollections,
-          // Send the active doc_version so the server gates cache/memory hits on it.
-          // When a new PDF is uploaded, doc_version changes → old cached answers are bypassed.
+          // doc_version gates the cache and memory hits on the active document.
+          // source_filename filters Qdrant to only return chunks from that PDF.
           doc_version: tabStates[activeTab].docVersion ?? undefined,
+          source_filename: tabStates[activeTab].sourceFilename ?? undefined,
         }),
       });
 
@@ -297,6 +299,7 @@ export default function Home() {
           ...prev[uploadTab],
           uploadStatus: data.message,
           docVersion: data.doc_version ?? null,
+          sourceFilename: data.source_filename ?? null,  // ← filename for Qdrant filter
           isUploading: false,
         },
       }));
@@ -321,7 +324,8 @@ export default function Home() {
         [activeTab]: {
           ...prev[activeTab],
           messages: [],
-          docVersion: null,  // reset document version — next upload will be a fresh start
+          docVersion: null,
+          sourceFilename: null,  // reset both version and filename on New Chat
         },
       }));
     } catch {

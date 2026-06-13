@@ -43,15 +43,34 @@ class RetrievalAgent(BaseAgent):
             metadata={"collections": collections, "doc_count": len(top_docs)},
         )
 
-    async def run_async(self, query: str, collections: list[str] | None = None) -> AgentResult:
-        """Async version — called by the orchestrator directly."""
+    async def run_async(
+        self,
+        query: str,
+        collections: list[str] | None = None,
+        source_filename: str | None = None,
+    ) -> AgentResult:
+        """
+        Async version — called by the orchestrator directly.
+
+        Args:
+            query:           user question (already rewritten by the retriever)
+            collections:     Qdrant collection names to search (None → planner decides)
+            source_filename: optional PDF basename to filter results to only this file.
+                             Prevents cross-document chunk bleed when multiple PDFs
+                             have been ingested into the same collection.
+        """
         import time
         t0 = time.perf_counter()
         try:
             if collections is None:
                 collections = planner(query)
-            logger.info("RetrievalAgent routing to: %s", collections)
-            top_docs, docs_with_scores = await hybrid_retrieve(query, collections)
+            logger.info(
+                "RetrievalAgent routing to: %s | source_filter: %s",
+                collections, source_filename or "none",
+            )
+            top_docs, docs_with_scores = await hybrid_retrieve(
+                query, collections, source_filename=source_filename
+            )
             latency = (time.perf_counter() - t0) * 1000
             logger.info(
                 "RetrievalAgent: %d docs in %.0fms from %s",
@@ -65,7 +84,6 @@ class RetrievalAgent(BaseAgent):
                 metadata={"collections": collections, "doc_count": len(top_docs)},
             )
         except Exception as exc:
-            import time
             latency = (time.perf_counter() - t0) * 1000
             logger.error("RetrievalAgent failed: %s", exc)
             return AgentResult(

@@ -109,22 +109,49 @@ def rewrite_query(question: str) -> str:
 # ── Semantic Search Leg ──────────────────────────────────────────────────────
 
 async def _semantic_search_collection(
-    collection: str, query_vector: list[float]
+    collection: str,
+    query_vector: list[float],
+    source_filename: str | None = None,
 ) -> list[tuple[str, float]]:
     """
     Vector search a single Qdrant collection.
     Applies MIN_SCORE threshold and collection confidence weighting.
     Returns [(text_with_source_header, weighted_score), ...].
 
+    source_filename: when provided, adds a Qdrant payload filter so ONLY
+    chunks whose source_file path contains this filename are returned.
+    This is the primary guard against cross-document chunk bleed when
+    multiple PDFs have been uploaded to the same collection.
+
     Each chunk is prefixed with a [Source: filename | Page: N] header so the
     LLM can distinguish content from different uploaded PDFs.  Without this
     header the LLM blends chunks from unrelated documents and hallucinates.
     """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
     try:
+        # Build payload filter for source_filename when a specific file is active.
+        # Uses the 'source_filename' payload field (bare basename stored during ingestion)
+        # with MatchValue for exact matching — more reliable than MatchText on full paths.
+        query_filter = None
+        if source_filename:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="source_filename",
+                        match=MatchValue(value=source_filename),
+                    )
+                ]
+            )
+            logger.debug(
+                "Semantic search: filtering to source_filename='%s'",
+                source_filename,
+            )
+
         results = qdrant.query_points(
             collection_name=collection,
             query=query_vector,
             limit=VECTOR_FETCH_K,
+            query_filter=query_filter,
         )
         confidence = COLLECTION_CONFIDENCE.get(collection, 1.0)
         hits = []
@@ -135,7 +162,7 @@ async def _semantic_search_collection(
                 # ── Score gate: low-relevance chunk discarded ──────────────
                 continue
 
-            # ── Build source header ──────────────────────────────────────
+            # ── Build source header ───────────────────────────────────────
             raw_path = point.payload.get("source_file", "")
             filename = os.path.basename(raw_path) if raw_path else "unknown"
             page = point.payload.get("page", 0)
@@ -154,14 +181,21 @@ async def _semantic_search_collection(
 # ── Main Entry Point ─────────────────────────────────────────────────────────
 
 async def hybrid_retrieve(
-    query: str, selected: list[str]
+    query: str,
+    selected: list[str],
+    source_filename: str | None = None,
 ) -> tuple[list[str], list[tuple[str, float]]]:
     """
     Full hybrid retrieval pipeline.
 
     Args:
-        query:    raw user question
-        selected: list of Qdrant collection names to search
+        query:           raw user question
+        selected:        list of Qdrant collection names to search
+        source_filename: optional PDF basename to restrict retrieval to.
+                         When set, both Qdrant vector search and BM25 results
+                         are filtered to only chunks from this specific file.
+                         This prevents the Universal tab from mixing chunks
+                         from multiple PDFs that share the same collection.
 
     Returns:
         (top_docs, docs_with_scores)
@@ -172,10 +206,14 @@ async def hybrid_retrieve(
     rewritten = rewrite_query(query)
     logger.debug("Query rewritten: '%s' → '%s'", query, rewritten)
 
-    # ── Step 2: Single embedding, parallel semantic search ───────────────────
+    # ── Step 2: Single embedding, parallel semantic search ───────────────────────
     query_vector = embeddings.embed_query(rewritten)
 
-    tasks = [_semantic_search_collection(c, query_vector) for c in selected]
+    # Pass source_filename to each collection's semantic search
+    tasks = [
+        _semantic_search_collection(c, query_vector, source_filename=source_filename)
+        for c in selected
+    ]
     semantic_results_per_col = await asyncio.gather(*tasks)
 
     # Map collection → semantic hits
@@ -186,19 +224,21 @@ async def hybrid_retrieve(
 
     total_semantic = sum(len(h) for h in per_collection.values())
     logger.debug(
-        "Semantic search: %d docs across %d collections (post-threshold)",
-        total_semantic, len(selected),
+        "Semantic search: %d docs across %d collections (post-threshold, source_filter=%s)",
+        total_semantic, len(selected), source_filename or "none",
     )
 
-    # ── Step 3 + 4: BM25 search + Ensemble + RRF fusion ────────────────────
-    fused: list[tuple[str, float]] = fuse_all_collections(per_collection, rewritten)
+    # ── Step 3 + 4: BM25 search + Ensemble + RRF fusion ───────────────────────
+    fused: list[tuple[str, float]] = fuse_all_collections(
+        per_collection, rewritten, source_filename=source_filename
+    )
 
     if not fused:
         return [], []
 
     top_docs = [text for text, _ in fused]
 
-    # ── Guard scores: use RAW COSINE similarities, NOT fused RRF scores ──────
+    # ── Guard scores: use RAW COSINE similarities, NOT fused RRF scores ────────
     # RRF stability scores are always ~0.015–0.016 regardless of relevance.
     # The guard needs REAL relevance signals (cosine 0-1) to correctly classify
     # HIGH vs LOW vs NONE confidence.

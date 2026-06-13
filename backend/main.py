@@ -99,14 +99,18 @@ class ChatRequest(BaseModel):
     question: str
     session_id: str = "default"
     collections: list[str] | None = None
-    doc_version: str | None = None  # MD5 fingerprint of active PDF (sent by frontend after upload)
+    doc_version: str | None = None      # MD5 fingerprint of active PDF
+    source_filename: str | None = None  # filename of the active PDF (for Qdrant filter)
 
 
 # ── Session → document version map ───────────────────────────────────────────
 # Tracks the MD5 fingerprint of the last uploaded PDF per session.
-# Used by the chat endpoint to look up doc_version when the frontend
-# does not send it explicitly (backward compatibility).
 _session_doc_version: dict[str, str] = {}
+
+# ── Session → source filename map ──────────────────────────────────────────────
+# Tracks the filename (basename) of the last uploaded PDF per session.
+# Used by the retriever to filter Qdrant chunks to only the active PDF.
+_session_source_file: dict[str, str] = {}
 
 
 
@@ -114,7 +118,8 @@ class UploadResponse(BaseModel):
     filename: str
     chunks_ingested: int
     collection: str
-    doc_version: str = ""     # MD5 fingerprint — returned to frontend to use in chat requests
+    doc_version: str = ""      # MD5 fingerprint — returned to frontend to use in chat requests
+    source_filename: str = ""  # bare filename — returned so frontend can send it in chat requests
     message: str
 
 
@@ -174,6 +179,55 @@ async def list_collections():
         raise HTTPException(status_code=500, detail=f"Failed to list collections: {str(e)}")
 
 
+@app.delete("/collections/reset")
+async def reset_all_collections():
+    """
+    ⚠️  DESTRUCTIVE: Delete ALL points from every Qdrant collection.
+
+    Use this when you need a clean slate (e.g. after upgrading the ingestion
+    pipeline to add new payload fields). The collection schemas are preserved —
+    only the stored vectors and payloads are wiped.
+
+    Also clears:
+      - All in-memory BM25 indexes
+      - All session memory and caches
+      - All server-side doc_version / source_file maps
+    """
+    from core.qdrant_client import qdrant
+    from ingestion.ingestion import COLLECTIONS
+    results = {}
+    try:
+        for collection in COLLECTIONS:
+            try:
+                # Delete ALL points — empty Filter() matches every point
+                from qdrant_client.models import FilterSelector, Filter
+                qdrant.delete(
+                    collection_name=collection,
+                    points_selector=FilterSelector(filter=Filter()),
+                )
+                # Rebuild (now empty) BM25 index
+                bm25_manager.refresh(collection)
+                results[collection] = "cleared"
+                logger.info("Reset: cleared all points from '%s'", collection)
+            except Exception as e:
+                results[collection] = f"error: {str(e)}"
+                logger.error("Reset: failed to clear '%s': %s", collection, e)
+
+        # Clear server-side session state
+        chat_memory.clear_all()
+        response_cache.clear_all()
+        _session_doc_version.clear()
+        _session_source_file.clear()
+
+        logger.info("Reset complete. Collections cleared: %s", results)
+        return {
+            "message": "All collections wiped. Re-upload your PDFs to populate with updated payload.",
+            "collections": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
+
+
 @app.get("/memory/{session_id}")
 async def get_memory(session_id: str):
     """Return conversation history for a session."""
@@ -219,12 +273,15 @@ async def upload_pdf(
         # Key by session_id (most accurate) when the frontend provides it,
         # AND by collection name (fallback for specific-tab uploads that don't
         # send session_id). This covers both Universal and specific-tab flows.
+        bare_filename = os.path.basename(file.filename)
         if session_id:
             _session_doc_version[session_id] = doc_version
+            _session_source_file[session_id] = bare_filename
             response_cache.set_doc_version(session_id, doc_version)
-            logger.info("doc_version stored for session_id='%s'", session_id)
+            logger.info("doc_version stored for session_id='%s' file='%s'", session_id, bare_filename)
         # Always also store by collection as a fallback
         _session_doc_version[collection] = doc_version
+        _session_source_file[collection] = bare_filename
         response_cache.set_doc_version(collection, doc_version)
 
         logger.info(
@@ -237,6 +294,7 @@ async def upload_pdf(
             chunks_ingested=chunks_count,
             collection=collection,
             doc_version=doc_version,
+            source_filename=bare_filename,
             message=(
                 f"Successfully ingested {chunks_count} chunks from '{file.filename}'. "
                 f"BM25 index refreshed. Document version: {doc_version[:8]}..."
@@ -271,15 +329,17 @@ async def chat(request: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
-    # ── Resolve doc_version ────────────────────────────────────────────────
-    # Prefer the version sent by the frontend (most accurate).
-    # Fall back to the server-side map (populated on upload) for clients
-    # that haven't been updated to send doc_version yet.
+    # ── Resolve doc_version and source_filename ───────────────────────────────
+    # Prefer values sent by the frontend (most accurate).
+    # Fall back to the server-side map (populated on upload).
     doc_version = request.doc_version or _session_doc_version.get(session_id)
+    source_filename = request.source_filename or _session_source_file.get(session_id)
 
     try:
         stream = await orchestrator.handle(
-            question, session_id, request.collections, doc_version=doc_version
+            question, session_id, request.collections,
+            doc_version=doc_version,
+            source_filename=source_filename,
         )
         return StreamingResponse(stream, media_type="text/plain")
     except Exception as e:
@@ -295,6 +355,7 @@ async def clear_memory(session_id: str):
     chat_memory.clear(session_id)
     response_cache.clear(session_id)  # also clears doc_version for this session
     _session_doc_version.pop(session_id, None)
+    _session_source_file.pop(session_id, None)
     return {"message": f"Memory and cache cleared for session '{session_id}'"}
 
 
@@ -304,4 +365,5 @@ async def clear_all_memory():
     chat_memory.clear_all()
     response_cache.clear_all()
     _session_doc_version.clear()
+    _session_source_file.clear()
     return {"message": "All memory and cache cleared"}

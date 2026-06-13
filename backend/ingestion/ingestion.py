@@ -1,3 +1,4 @@
+import os
 import uuid
 import logging
 from langchain_community.document_loaders import PyPDFLoader
@@ -85,6 +86,7 @@ def ingest_pdf(file_path: str, collection: str = "research_papers"):
                 "text": chunks[i].page_content,
                 "page": chunks[i].metadata.get("page", 0),
                 "source_file": file_path,
+                "source_filename": os.path.basename(file_path),  # bare name for Qdrant filtering
                 "collection": collection,
             },
         )

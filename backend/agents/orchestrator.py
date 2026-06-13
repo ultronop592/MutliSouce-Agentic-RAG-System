@@ -63,18 +63,22 @@ class Orchestrator:
         session_id: str,
         collections: list[str] | None = None,
         doc_version: str | None = None,
+        source_filename: str | None = None,
     ) -> AsyncIterator[str]:
         """
         Main entry point.  Returns an async generator of text chunks
         (compatible with FastAPI StreamingResponse).
 
         Args:
-            query:       raw user question
-            session_id:  unique session identifier
-            collections: optional list of Qdrant collections to search
-            doc_version: MD5 fingerprint of the active PDF for this session.
-                         When provided, cache and memory hits are gated on this
-                         version so a new PDF upload forces fresh retrieval.
+            query:           raw user question
+            session_id:      unique session identifier
+            collections:     optional list of Qdrant collections to search
+            doc_version:     MD5 fingerprint of the active PDF for this session.
+                             Gates cache and memory hits on document version.
+            source_filename: basename of the active PDF (e.g. 'report.pdf').
+                             Passed to the retriever to filter Qdrant results to
+                             ONLY chunks from this file, preventing cross-document
+                             chunk bleed when multiple PDFs exist in a collection.
         """
         t_start = time.perf_counter()
         logger.info(
@@ -141,7 +145,11 @@ class Orchestrator:
         # ── Path C: FULL RETRIEVAL PIPELINE ─────────────────────────────────
 
         # Step C1: Hybrid retrieval (semantic + BM25 + RRF)
-        retrieval_result = await retrieval_agent.run_async(query, collections=collections)
+        # Pass source_filename so the retriever can filter Qdrant to only the
+        # active PDF's chunks — prevents cross-document bleed in mixed collections.
+        retrieval_result = await retrieval_agent.run_async(
+            query, collections=collections, source_filename=source_filename
+        )
         top_docs: list[str] = retrieval_result.data.get("docs", [])
         docs_with_scores: list[tuple[str, float]] = retrieval_result.data.get("scored", [])
 

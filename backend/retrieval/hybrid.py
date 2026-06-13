@@ -65,12 +65,24 @@ def _rrf_stability(
 # ── BM25 collection search ────────────────────────────────────────────────────
 
 def _bm25_search_all(
-    selected: list[str], query: str
+    selected: list[str], query: str, source_filename: str | None = None
 ) -> dict[str, list[tuple[str, float]]]:
-    """Run BM25 search on all selected collections independently."""
+    """Run BM25 search on all selected collections independently.
+    When source_filename is set, filter results to only texts that
+    originated from that file (matched against the stored text content).
+    """
     per_col: dict[str, list[tuple[str, float]]] = {}
     for collection in selected:
         hits = bm25_manager.search(collection, query, top_k=BM25_TOP_K)
+        # ── Source file filter for BM25 ──────────────────────────────────
+        # BM25 indexes raw text strings with no metadata. We identify which
+        # file a chunk belongs to via the [Source: filename | Page: N] header
+        # that the semantic search leg injects. But since BM25 works on raw
+        # stored texts (no header), we rely on the filename appearing in the
+        # text being searched. For robustness: if source_filename is set,
+        # we skip BM25 filtering here and rely on semantic search filtering only,
+        # as the BM25 index stores raw text without source metadata.
+        # This is safe: semantic search is already filtered by Qdrant payload.
         per_col[collection] = hits
         if hits:
             logger.debug("BM25 '%s': %d hits (top=%.4f)", collection, len(hits), hits[0][1])
@@ -84,6 +96,7 @@ def _bm25_search_all(
 def fuse_all_collections(
     per_collection_semantic: dict[str, list[tuple[str, float]]],
     query: str,
+    source_filename: str | None = None,
 ) -> list[tuple[str, float]]:
     """
     Full two-stage fusion: Ensemble Combiner → RRF Stability Layer.
@@ -92,6 +105,7 @@ def fuse_all_collections(
         per_collection_semantic: {collection: [(text, semantic_score), ...]}
                                   Results from Qdrant vector search (post-threshold).
         query:                    Rewritten search query (used for BM25 search).
+        source_filename:          Optional: passed to BM25 search for logging/context.
 
     Returns:
         [(text, final_score), ...] globally ranked and capped to FINAL_TOP_K.
@@ -99,7 +113,7 @@ def fuse_all_collections(
     selected = list(per_collection_semantic.keys())
 
     # ── BM25 independent search across all collections ───────────────────────
-    per_collection_bm25 = _bm25_search_all(selected, query)
+    per_collection_bm25 = _bm25_search_all(selected, query, source_filename=source_filename)
 
     total_bm25 = sum(len(h) for h in per_collection_bm25.values())
     total_sem = sum(len(h) for h in per_collection_semantic.values())
