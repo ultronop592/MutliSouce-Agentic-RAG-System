@@ -8,6 +8,11 @@ Produces Claude/GPT-style responses:
   - Markdown formatting: **bold**, bullet points, numbered lists, headers
   - Streams token-by-token so the frontend displays words progressively
   - Strict grounding: every claim must be traceable to the retrieved context
+
+HALLUCINATION FIX: Explicit cross-document isolation instruction added.
+The LLM is now explicitly told to ignore any facts from Previous Conversation
+that are not also confirmed by the current Retrieved Context. This prevents
+bleed from earlier PDF discussions into the current answer.
 """
 
 import logging
@@ -60,6 +65,14 @@ class AnswerAgent:
 4. If the context does not contain enough information, respond with exactly:
    "I don't have enough information in my knowledge base to answer this accurately."
 5. Before writing each sentence, mentally ask: "Is this explicitly in the Retrieved Context?" — if not, omit it.
+
+══ CROSS-DOCUMENT ISOLATION (critical anti-hallucination rule) ══
+6. The "Previous Conversation" section below contains answers from earlier questions.
+   Those answers may have been about a DIFFERENT document than the current one.
+7. Do NOT use any fact or claim from Previous Conversation UNLESS that exact fact
+   also appears in the current Retrieved Context.
+8. The Retrieved Context is the ONLY trusted source for this response.
+   Previous Conversation is provided for conversational tone only — NOT as a fact source.
 
 Previous Conversation:
 {memory_str if memory_str else "(none)"}

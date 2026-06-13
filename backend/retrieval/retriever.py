@@ -40,9 +40,11 @@ logger = logging.getLogger(__name__)
 # Cosine similarity threshold — chunks below this score are discarded BEFORE
 # they reach the hybrid fusion stage.  This is the primary guard against
 # "garbage-in → hallucination-out".
-# Set to 0.20 — real document chunks score 0.60+ even for vague queries;
-# 0.20 filters true irrelevant noise while allowing general questions through.
-MIN_SCORE: float = 0.20
+# Raised from 0.20 → 0.35 to prevent near-irrelevant chunks from poisoning the
+# LLM context with garbage that triggers hallucinations.
+# Real on-topic chunks score 0.55+ even for vague queries; 0.35 filters
+# low-relevance noise while still allowing broad/general questions through.
+MIN_SCORE: float = 0.35
 
 # How many vector candidates to pull per collection (before threshold filter)
 VECTOR_FETCH_K: int = 12

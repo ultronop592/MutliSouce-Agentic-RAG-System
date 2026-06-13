@@ -17,9 +17,11 @@ startup/shutdown, and error boundaries.
 """
 
 import os
+import hashlib
 import shutil
 import tempfile
 import logging
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -97,6 +99,14 @@ class ChatRequest(BaseModel):
     question: str
     session_id: str = "default"
     collections: list[str] | None = None
+    doc_version: str | None = None  # MD5 fingerprint of active PDF (sent by frontend after upload)
+
+
+# ── Session → document version map ───────────────────────────────────────────
+# Tracks the MD5 fingerprint of the last uploaded PDF per session.
+# Used by the chat endpoint to look up doc_version when the frontend
+# does not send it explicitly (backward compatibility).
+_session_doc_version: dict[str, str] = {}
 
 
 
@@ -104,6 +114,7 @@ class UploadResponse(BaseModel):
     filename: str
     chunks_ingested: int
     collection: str
+    doc_version: str = ""     # MD5 fingerprint — returned to frontend to use in chat requests
     message: str
 
 
@@ -187,19 +198,42 @@ async def upload_pdf(
     temp_path = os.path.join(temp_dir, file.filename)
 
     try:
+        # Read file content ONCE — needed for both ingestion and MD5 hash
+        content = await file.read()
+
+        # ── Compute MD5 document fingerprint ──────────────────────────────────
+        # This fingerprint acts as a "document version" that we tag on every
+        # cache entry and memory turn. When the user uploads a different PDF,
+        # the fingerprint changes → old cached answers are bypassed automatically.
+        doc_version = hashlib.md5(content).hexdigest()
+        logger.info("Upload: '%s' | doc_version=%s | session=%s", file.filename, doc_version, collection)
+
+        # ── Write to temp file for ingestion ─────────────────────────────────
         with open(temp_path, "wb") as f:
-            content = await file.read()
             f.write(content)
 
         chunks_count = ingest_pdf(temp_path, collection)
+
+        # ── Invalidate session cache for ALL sessions that had a different PDF ─
+        # We invalidate the cache for the collection-scoped session key so that
+        # any previously cached answers for this collection are cleared.
+        # Also update the session doc_version map and the cache's own version map.
+        _session_doc_version[collection] = doc_version
+        response_cache.set_doc_version(collection, doc_version)
+
+        logger.info(
+            "Upload complete: '%s' | %d chunks | doc_version=%s",
+            file.filename, chunks_count, doc_version,
+        )
 
         return UploadResponse(
             filename=file.filename,
             chunks_ingested=chunks_count,
             collection=collection,
+            doc_version=doc_version,
             message=(
                 f"Successfully ingested {chunks_count} chunks from '{file.filename}'. "
-                f"BM25 index refreshed."
+                f"BM25 index refreshed. Document version: {doc_version[:8]}..."
             ),
         )
     except Exception as e:
@@ -231,8 +265,16 @@ async def chat(request: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
+    # ── Resolve doc_version ────────────────────────────────────────────────
+    # Prefer the version sent by the frontend (most accurate).
+    # Fall back to the server-side map (populated on upload) for clients
+    # that haven't been updated to send doc_version yet.
+    doc_version = request.doc_version or _session_doc_version.get(session_id)
+
     try:
-        stream = await orchestrator.handle(question, session_id, request.collections)
+        stream = await orchestrator.handle(
+            question, session_id, request.collections, doc_version=doc_version
+        )
         return StreamingResponse(stream, media_type="text/plain")
     except Exception as e:
         logger.error("Orchestrator error for session=%s: %s", session_id, e)
@@ -245,7 +287,8 @@ async def clear_memory(session_id: str):
     Called by the frontend 'New Chat' button so the next conversation
     starts completely fresh with no stale answers from the previous PDF."""
     chat_memory.clear(session_id)
-    response_cache.clear(session_id)  # clear session-scoped cache too
+    response_cache.clear(session_id)  # also clears doc_version for this session
+    _session_doc_version.pop(session_id, None)
     return {"message": f"Memory and cache cleared for session '{session_id}'"}
 
 
@@ -254,4 +297,5 @@ async def clear_all_memory():
     """Clear ALL conversation memory and ALL session caches."""
     chat_memory.clear_all()
     response_cache.clear_all()
+    _session_doc_version.clear()
     return {"message": "All memory and cache cleared"}

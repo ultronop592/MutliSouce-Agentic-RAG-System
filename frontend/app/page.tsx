@@ -25,6 +25,7 @@ interface TabState {
   showUpload: boolean;
   uploadStatus: string | null;
   isUploading: boolean;
+  docVersion: string | null;  // MD5 fingerprint of the currently active PDF
 }
 
 const TABS_INFO = {
@@ -80,11 +81,11 @@ export default function Home() {
   
   // Independent states for each tab
   const [tabStates, setTabStates] = useState<Record<keyof typeof TABS_INFO, TabState>>({
-    universal: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false },
-    research_papers: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false },
-    knowledge_base: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false },
-    code_docs: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false },
-    faq_data: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false },
+    universal: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
+    research_papers: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
+    knowledge_base: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
+    code_docs: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
+    faq_data: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null },
   });
 
   const [collections, setCollections] = useState<CollectionInfo[]>([]);
@@ -177,6 +178,9 @@ export default function Home() {
           question: textToSend,
           session_id: `${activeTab}-${activeSessionId}`, // Isolate chat memory sessions per tab
           collections: targetCollections,
+          // Send the active doc_version so the server gates cache/memory hits on it.
+          // When a new PDF is uploaded, doc_version changes → old cached answers are bypassed.
+          doc_version: tabStates[activeTab].docVersion ?? undefined,
         }),
       });
 
@@ -275,7 +279,12 @@ export default function Home() {
       }
 
       const data = await res.json();
-      updateActiveTabState({ uploadStatus: data.message });
+      // Store the doc_version returned by the server so all future chat requests
+      // in this tab send the correct document fingerprint.
+      updateActiveTabState({
+        uploadStatus: data.message,
+        docVersion: data.doc_version ?? null,
+      });
       fetchCollections();
     } catch (error) {
       updateActiveTabState({
@@ -288,12 +297,13 @@ export default function Home() {
 
   const handleClearMemory = async () => {
     try {
-      await fetch(`${API_BASE}/memory/${activeTab}-${activeSessionId}`, { method: "DELETE" });
+      await fetch(`${API_BASE}/memory/${activeTab}-${tabStates[activeTab].sessionId}`, { method: "DELETE" });
       setTabStates((prev) => ({
         ...prev,
         [activeTab]: {
           ...prev[activeTab],
           messages: [],
+          docVersion: null,  // reset document version — next upload will be a fresh start
         },
       }));
     } catch {

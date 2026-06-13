@@ -6,7 +6,8 @@ Provides two capabilities:
   1. Fast semantic lookup  — Searches the session's recent conversation history
                              using cosine similarity on cached question embeddings.
                              If a past turn answers the current question (similarity
-                             ≥ MEMORY_HIT_THRESHOLD), returns the stored answer
+                             ≥ MEMORY_HIT_THRESHOLD) AND the turn was created for
+                             the SAME document version, returns the stored answer
                              immediately — no Qdrant call, no LLM call.
                              This is the fastest, most hallucination-free path.
 
@@ -14,10 +15,10 @@ Provides two capabilities:
                              CONVERSATIONAL queries (greetings, thanks, etc.)
                              using the LLM with minimal context.
 
-Why this prevents hallucinations:
-  Memory answers come from VERIFIED past responses that were already grounded.
-  A repeated or follow-up question gets the same grounded answer, not a
-  freshly hallucinated one from the LLM's general knowledge.
+Why doc_version matters:
+  Without it, asking "What are the key topics?" with PDF-A cached, then uploading
+  PDF-B and asking the same question, would return PDF-A's answer from memory.
+  With doc_version filtering, only turns from the SAME document version match.
 """
 
 import math
@@ -57,10 +58,20 @@ class MemoryAgent(BaseAgent):
         self,
         session_id: str,
         query_embedding: list[float],
+        doc_version: str | None = None,
     ) -> AgentResult:
         """
         Search the last RECENT_TURNS_WINDOW turns for a semantically similar
-        question. Returns the stored answer if found above threshold, else None.
+        question.
+
+        A memory hit requires BOTH:
+          - cosine similarity ≥ MEMORY_HIT_THRESHOLD
+          - turn.doc_version == current doc_version (same document)
+
+        If doc_version is None (no document uploaded yet), only matches turns
+        that also have no doc_version (general conversational turns).
+
+        Returns the stored answer if found, else AgentResult(success=False).
         """
         history = chat_memory.get_recent(session_id, RECENT_TURNS_WINDOW)
         if not history:
@@ -74,6 +85,18 @@ class MemoryAgent(BaseAgent):
             cached_emb = turn.get("embedding")
             if not cached_emb:
                 continue  # embedding not cached for this turn — skip
+
+            # ── Document version gate ────────────────────────────────────────
+            # Only reuse an answer that was generated for the SAME document.
+            # If either version is None, require BOTH to be None for a match.
+            turn_doc_ver = turn.get("doc_version")
+            if doc_version != turn_doc_ver:
+                logger.debug(
+                    "MemoryAgent: skipping turn (doc_version mismatch: current=%s, turn=%s)",
+                    doc_version, turn_doc_ver,
+                )
+                continue  # different document — NEVER reuse this answer
+
             sim = _cosine(query_embedding, cached_emb)
             if sim > best_sim:
                 best_sim = sim
@@ -82,8 +105,8 @@ class MemoryAgent(BaseAgent):
 
         if best_sim >= MEMORY_HIT_THRESHOLD and best_answer:
             logger.info(
-                "MemoryAgent HIT (sim=%.3f): '%s' → reusing answer",
-                best_sim, best_question[:60],
+                "MemoryAgent HIT (sim=%.3f, doc_version=%s): '%s' → reusing answer",
+                best_sim, doc_version, best_question[:60],
             )
             return AgentResult(
                 agent=self.name,
@@ -93,7 +116,7 @@ class MemoryAgent(BaseAgent):
                 metadata={"similarity": best_sim, "matched_question": best_question},
             )
 
-        logger.debug("MemoryAgent MISS (best_sim=%.3f)", best_sim)
+        logger.debug("MemoryAgent MISS (best_sim=%.3f, doc_version=%s)", best_sim, doc_version)
         return AgentResult(agent=self.name, success=False, data=None, latency_ms=0.0)
 
     # ── 2. Conversational reply ──────────────────────────────────────────────

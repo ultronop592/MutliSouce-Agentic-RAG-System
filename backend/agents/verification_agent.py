@@ -3,6 +3,13 @@ Verification Agent
 ------------------
 A fact-checking agent that verifies the generated RAG response against the
 original retrieved documents to detect and reject hallucinations.
+
+HALLUCINATION FIX:
+  - Removed the overly broad short-circuit that treated ANY answer containing
+    "enough information" as verified. Now only the exact sentinel message is
+    allowed through without verification.
+  - Tightened the verification prompt to explicitly catch generic-knowledge
+    hallucinations (facts that feel correct but aren't in the context).
 """
 
 import json
@@ -12,6 +19,10 @@ from agents.base import BaseAgent, AgentResult
 from core.llm import llm
 
 logger = logging.getLogger(__name__)
+
+# The exact message the AnswerAgent emits when context is insufficient.
+# Only this exact message is allowed through without full verification.
+_NO_INFO_SENTINEL = "I don't have enough information in my knowledge base to answer this accurately."
 
 
 class VerificationAgent(BaseAgent):
@@ -31,9 +42,12 @@ class VerificationAgent(BaseAgent):
         Verify the generated answer against the retrieved context.
         Returns a dict: {"status": "verified" | "failed" | "error", "reason": str}
         """
-        # If the answer is the empty-context message, it's always verified
-        NO_INFO_MSG = "I don't have enough information in my knowledge base to answer this accurately."
-        if NO_INFO_MSG in answer or "enough information" in answer.lower():
+        # ── Exact sentinel check (not a broad substring match) ────────────────
+        # Only the precise "I don't have enough information..." message is
+        # pre-approved. Any other answer that merely contains words like
+        # "enough information" must go through full verification.
+        answer_stripped = answer.strip()
+        if answer_stripped == _NO_INFO_SENTINEL:
             return {"status": "verified", "reason": "No-info default reply"}
 
         prompt = f"""You are an elite RAG Fact-Verification Agent. Your task is to evaluate a generated answer against the retrieved context to verify that every single statement in the answer is 100% grounded in the context.
@@ -45,12 +59,19 @@ Generated Answer:
 {answer}
 
 Instructions:
-1. Carefully compare the Generated Answer against the Retrieved Context.
-2. Check if the Generated Answer contains any statements, assumptions, or facts that do NOT appear explicitly in the retrieved context.
-3. If the answer is 100% grounded and contains no ungrounded claims or extrapolations, return:
+1. Carefully compare every claim in the Generated Answer against the Retrieved Context.
+2. Flag any statement that meets ANY of these criteria:
+   - Not explicitly stated in the retrieved context.
+   - An inference or extrapolation beyond what the context says.
+   - A generic fact from common knowledge that does NOT appear in the context.
+   - A mix of facts from different documents that creates a misleading composite.
+3. If the answer is 100% grounded (every claim has a direct basis in the context), return:
 {{"status": "verified", "reason": "all claims are grounded"}}
-4. If there is a hallucination, extrapolation, or ungrounded claim, return:
-{{"status": "failed", "reason": "<specific detail describing which statement in the answer is ungrounded or hallucinated>"}}
+4. If ANY hallucination, extrapolation, generic-knowledge fact, or ungrounded claim exists, return:
+{{"status": "failed", "reason": "<specific detail: which exact statement is ungrounded and why>"}}
+
+IMPORTANT: Be strict. An answer that is mostly correct but contains even one sentence
+drawn from general knowledge (not the context) should be marked "failed".
 
 Return ONLY a valid JSON object. No explanation outside the JSON.
 Verification Result:"""

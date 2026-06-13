@@ -11,7 +11,7 @@ Pipeline paths (chosen by the Router Agent):
 
   Path B — MEMORY HIT (very fast, hallucination-free)
   ────────────────────────────────────────────────────
-  Router → Memory Agent (semantic lookup) → stream cached answer
+  Router → Memory Agent (semantic lookup, doc_version-gated) → stream cached answer
 
   Path C — FULL RETRIEVAL (complete pipeline)
   ────────────────────────────────────────────
@@ -22,8 +22,15 @@ Pipeline paths (chosen by the Router Agent):
                          └─→ Answer Agent  (grounded response, streamed)
 
 After every Path C response:
-  - Conversation memory is updated (with embedding cached on the turn)
-  - Semantic cache is updated (TTL = 1 hour)
+  - Conversation memory is updated (with embedding AND doc_version cached on the turn)
+  - Semantic cache is updated (TTL = 1 hour, keyed by session + doc_version)
+
+DOC VERSION FLOW:
+  - doc_version is the MD5 fingerprint of the currently active PDF in this session.
+  - It is passed by the frontend in every ChatRequest (populated after upload).
+  - Cache and memory lookups ONLY hit if both session_id AND doc_version match.
+  - This means a new PDF upload automatically forces full retrieval for any
+    previously cached question — no "New Chat" button needed.
 
 Every agent step is timed and logged so you can trace slow requests in production.
 """
@@ -55,13 +62,25 @@ class Orchestrator:
         query: str,
         session_id: str,
         collections: list[str] | None = None,
+        doc_version: str | None = None,
     ) -> AsyncIterator[str]:
         """
         Main entry point.  Returns an async generator of text chunks
         (compatible with FastAPI StreamingResponse).
+
+        Args:
+            query:       raw user question
+            session_id:  unique session identifier
+            collections: optional list of Qdrant collections to search
+            doc_version: MD5 fingerprint of the active PDF for this session.
+                         When provided, cache and memory hits are gated on this
+                         version so a new PDF upload forces fresh retrieval.
         """
         t_start = time.perf_counter()
-        logger.info("=== Orchestrator START | session=%s | query='%s'", session_id, query[:80])
+        logger.info(
+            "=== Orchestrator START | session=%s | doc_version=%s | query='%s'",
+            session_id, doc_version, query[:80],
+        )
 
         # ── Step 1: Embed question (single call, reused by cache + memory) ──
         question_embedding: list[float] | None = None
@@ -71,12 +90,15 @@ class Orchestrator:
             logger.warning("Embedding failed: %s", e)
 
         # ── Step 2: Semantic cache check ────────────────────────────────────
-        # CRITICAL: session_id is passed so cache hits from one PDF/session
-        # NEVER bleed into a different session. See cache.py for details.
+        # CRITICAL: session_id AND doc_version are both required for a hit.
+        # A new PDF upload changes doc_version → cache miss → forces retrieval.
         if question_embedding:
-            cached = response_cache.get(session_id, question_embedding)
+            cached = response_cache.get(session_id, question_embedding, doc_version)
             if cached:
-                logger.info("Cache HIT — returning in %.0fms", (time.perf_counter() - t_start) * 1000)
+                logger.info(
+                    "Cache HIT (doc_version=%s) — returning in %.0fms",
+                    doc_version, (time.perf_counter() - t_start) * 1000,
+                )
                 async def _cached_stream():
                     yield cached
                 return _cached_stream()
@@ -89,24 +111,28 @@ class Orchestrator:
         # ── Path A: CONVERSATIONAL ───────────────────────────────────────────
         if route == RouteType.CONVERSATIONAL:
             reply = memory_agent.conversational_reply(query, session_id)
-            chat_memory.update(session_id, query, reply, embedding=question_embedding)
+            # Conversational turns are stored WITHOUT doc_version — they are
+            # not document-specific and should always be memory-eligible.
+            chat_memory.update(session_id, query, reply, embedding=question_embedding, doc_version=None)
             async def _conv_stream():
                 yield reply
             return _conv_stream()
 
         # ── Path B: MEMORY FIRST — check semantic memory ─────────────────────
+        # doc_version is passed so only same-document turns are considered.
         if route == RouteType.MEMORY_FIRST and question_embedding:
-            mem_result = memory_agent.run(session_id, question_embedding)
+            mem_result = memory_agent.run(session_id, question_embedding, doc_version)
             if mem_result.success and mem_result.data:
                 logger.info(
-                    "Memory HIT (sim=%.3f) — returning in %.0fms",
+                    "Memory HIT (sim=%.3f, doc_version=%s) — returning in %.0fms",
                     mem_result.metadata.get("similarity", 0),
+                    doc_version,
                     (time.perf_counter() - t_start) * 1000,
                 )
                 answer = mem_result.data
                 # Cache this re-served memory answer in the same session's cache
                 if question_embedding:
-                    response_cache.set(session_id, question_embedding, answer)
+                    response_cache.set(session_id, question_embedding, answer, doc_version)
                 async def _mem_stream():
                     yield answer
                 return _mem_stream()
@@ -173,15 +199,20 @@ class Orchestrator:
                     break
                 elif status == "failed":
                     feedback = check.get("reason", "")
-                    logger.warning("VerificationAgent: check FAILED on attempt %d: %s. Triggering self-correction...", attempts, feedback)
-                    
+                    logger.warning(
+                        "VerificationAgent: check FAILED on attempt %d: %s. Triggering self-correction...",
+                        attempts, feedback,
+                    )
                     # Regenerate with correction feedback passed to the LLM
                     answer_candidate = await answer_agent.generate(
                         query, context, memory_str, advisory_note, feedback=feedback
                     )
                 else:
                     # Error state (e.g. network timeout or API error) — proceed to avoid blocking user flow
-                    logger.warning("VerificationAgent: check errored: %s. Bypassing verification.", check.get("reason"))
+                    logger.warning(
+                        "VerificationAgent: check errored: %s. Bypassing verification.",
+                        check.get("reason"),
+                    )
                     verified = True
                     break
             
@@ -196,23 +227,27 @@ class Orchestrator:
             for i in range(0, len(final_answer), chunk_size):
                 chunk = final_answer[i : i + chunk_size]
                 yield chunk
-                await asyncio.sleep(0.005) # fast, smooth progressive typing effect
+                await asyncio.sleep(0.005)  # fast, smooth progressive typing effect
                 
-            # Post-stream: update memory and cache
+            # Post-stream: update memory and cache WITH doc_version
+            # This ensures future memory/cache hits are gated on the same document.
             if full_response and "[Error" not in full_response:
                 chat_memory.update(
                     session_id, query, full_response,
                     embedding=question_embedding,
+                    doc_version=doc_version,   # ← tag this answer to the current PDF
                 )
-                # Store answer in session-scoped cache so it can be reused
-                # within this session only — NOT shared across sessions.
                 if question_embedding:
-                    response_cache.set(session_id, question_embedding, full_response)
+                    response_cache.set(
+                        session_id, question_embedding, full_response,
+                        doc_version=doc_version,   # ← cache hit requires same PDF
+                    )
             
             total_ms = (time.perf_counter() - t_start) * 1000
             logger.info(
-                "=== Orchestrator DONE | session=%s | %.0fms | docs=%d | confidence=%s | verified=%s",
-                session_id, total_ms, len(reranked_docs), confidence_level, "yes" if verified else "no",
+                "=== Orchestrator DONE | session=%s | doc_version=%s | %.0fms | docs=%d | confidence=%s | verified=%s",
+                session_id, doc_version, total_ms, len(reranked_docs),
+                confidence_level, "yes" if verified else "no",
             )
 
         return _retrieval_stream()
