@@ -24,10 +24,15 @@ import logging
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+
+# ── Admin secret ─────────────────────────────────────────────────────────────────
+# Loaded from the ADMIN_SECRET env var (set in Render dashboard).
+# Required as X-Admin-Secret header on destructive admin endpoints.
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 
 from agents.orchestrator import orchestrator
 from retrieval.bm25_index import bm25_manager
@@ -180,19 +185,18 @@ async def list_collections():
 
 
 @app.delete("/collections/reset")
-async def reset_all_collections():
+async def reset_all_collections(
+    x_admin_secret: str | None = Header(default=None, alias="X-Admin-Secret"),
+):
     """
     ⚠️  DESTRUCTIVE: Delete ALL points from every Qdrant collection.
-
-    Use this when you need a clean slate (e.g. after upgrading the ingestion
-    pipeline to add new payload fields). The collection schemas are preserved —
-    only the stored vectors and payloads are wiped.
-
-    Also clears:
-      - All in-memory BM25 indexes
-      - All session memory and caches
-      - All server-side doc_version / source_file maps
-    """
+    Requires the X-Admin-Secret header to match the ADMIN_SECRET env var.
+    """    
+    # ── Auth check ────────────────────────────────────────────────────────
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Admin secret not configured on server.")
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Secret header.")
     from core.qdrant_client import qdrant
     from ingestion.ingestion import COLLECTIONS
     results = {}
