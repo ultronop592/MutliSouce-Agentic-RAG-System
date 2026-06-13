@@ -189,6 +189,7 @@ async def get_memory(session_id: str):
 async def upload_pdf(
     file: UploadFile = File(...),
     collection: str = "research_papers",
+    session_id: str | None = None,  # optional: frontend passes this to scope doc_version correctly
 ):
     """Upload a PDF and ingest it into Qdrant. Automatically refreshes BM25 index."""
     if not file.filename.lower().endswith(".pdf"):
@@ -214,10 +215,15 @@ async def upload_pdf(
 
         chunks_count = ingest_pdf(temp_path, collection)
 
-        # ── Invalidate session cache for ALL sessions that had a different PDF ─
-        # We invalidate the cache for the collection-scoped session key so that
-        # any previously cached answers for this collection are cleared.
-        # Also update the session doc_version map and the cache's own version map.
+        # ── Register doc_version in server-side map ──────────────────────────
+        # Key by session_id (most accurate) when the frontend provides it,
+        # AND by collection name (fallback for specific-tab uploads that don't
+        # send session_id). This covers both Universal and specific-tab flows.
+        if session_id:
+            _session_doc_version[session_id] = doc_version
+            response_cache.set_doc_version(session_id, doc_version)
+            logger.info("doc_version stored for session_id='%s'", session_id)
+        # Always also store by collection as a fallback
         _session_doc_version[collection] = doc_version
         response_cache.set_doc_version(collection, doc_version)
 

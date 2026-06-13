@@ -256,22 +256,32 @@ export default function Home() {
       return;
     }
 
-    updateActiveTabState({
-      isUploading: true,
-      uploadStatus: "Uploading and processing...",
-    });
+    // ── Capture tab identity BEFORE any awaits ────────────────────────────────
+    // React state (activeTab, activeSessionId) can change while the upload is
+    // in-flight. Capture them now so the async callbacks write to the correct tab.
+    const uploadTab = activeTab;
+    const uploadSessionId = tabStates[activeTab].sessionId;
+    // The session_id sent to the backend for this tab's chat requests:
+    const chatSessionId = `${uploadTab}-${uploadSessionId}`;
+
+    setTabStates((prev) => ({
+      ...prev,
+      [uploadTab]: { ...prev[uploadTab], isUploading: true, uploadStatus: "Uploading and processing..." },
+    }));
 
     try {
       const formData = new FormData();
       formData.append("file", file);
 
       // Upload automatically routes to target collection (defaults to "research_papers" for universal)
-      const targetCollection = activeTab === "universal" ? "research_papers" : activeTab;
+      const targetCollection = uploadTab === "universal" ? "research_papers" : uploadTab;
 
-      const res = await fetch(`${API_BASE}/upload?collection=${targetCollection}`, {
-        method: "POST",
-        body: formData,
-      });
+      // Send session_id so the server keys the doc_version by session (not just by collection).
+      // This is critical for the Universal tab where session_id != collection name.
+      const res = await fetch(
+        `${API_BASE}/upload?collection=${targetCollection}&session_id=${encodeURIComponent(chatSessionId)}`,
+        { method: "POST", body: formData },
+      );
 
       if (!res.ok) {
         const error = await res.json();
@@ -279,19 +289,27 @@ export default function Home() {
       }
 
       const data = await res.json();
-      // Store the doc_version returned by the server so all future chat requests
-      // in this tab send the correct document fingerprint.
-      updateActiveTabState({
-        uploadStatus: data.message,
-        docVersion: data.doc_version ?? null,
-      });
+      // ── Write docVersion to the CAPTURED tab, not the currently active tab ──
+      // If the user switched tabs during upload, we still update the right one.
+      setTabStates((prev) => ({
+        ...prev,
+        [uploadTab]: {
+          ...prev[uploadTab],
+          uploadStatus: data.message,
+          docVersion: data.doc_version ?? null,
+          isUploading: false,
+        },
+      }));
       fetchCollections();
     } catch (error) {
-      updateActiveTabState({
-        uploadStatus: `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-      });
-    } finally {
-      updateActiveTabState({ isUploading: false });
+      setTabStates((prev) => ({
+        ...prev,
+        [uploadTab]: {
+          ...prev[uploadTab],
+          uploadStatus: `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+          isUploading: false,
+        },
+      }));
     }
   };
 
