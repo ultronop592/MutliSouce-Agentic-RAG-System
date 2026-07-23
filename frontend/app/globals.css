@@ -104,11 +104,44 @@
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.2s ease-out forwards;
+  animation: fadeIn 0.25s ease-out forwards;
 }
 
 .animate-slide-in {
-  animation: slideIn 0.2s ease-out forwards;
+  animation: slideIn 0.25s ease-out forwards;
+}
+
+@keyframes pulseSubtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@keyframes indeterminateProgress {
+  0% {
+    left: -35%;
+    width: 35%;
+  }
+  60% {
+    left: 100%;
+    width: 60%;
+  }
+  100% {
+    left: 100%;
+    width: 60%;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulseSubtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-indeterminate-progress {
+  position: absolute;
+  animation: indeterminateProgress 2.2s infinite ease-in-out;
 }
 
 .typing-dot:nth-child(1) {

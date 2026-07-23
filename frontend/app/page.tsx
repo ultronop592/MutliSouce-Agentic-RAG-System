@@ -80,6 +80,11 @@ const TABS_INFO = {
 export default function Home() {
   const [activeTab, setActiveTab] = useState<keyof typeof TABS_INFO>("universal");
   
+  // Server connectivity & cold start status
+  type ServerStatus = "checking" | "waking" | "ready" | "error";
+  const [serverStatus, setServerStatus] = useState<ServerStatus>("checking");
+  const [coldStartSecs, setColdStartSecs] = useState<number>(0);
+
   // Independent states for each tab
   const [tabStates, setTabStates] = useState<Record<keyof typeof TABS_INFO, TabState>>({
     universal: { messages: [], input: "", isLoading: false, sessionId: crypto.randomUUID(), showUpload: false, uploadStatus: null, isUploading: false, docVersion: null, sourceFilename: null },
@@ -105,6 +110,7 @@ export default function Home() {
   const activeShowUpload = currentTabState.showUpload;
   const activeUploadStatus = currentTabState.uploadStatus;
   const activeIsUploading = currentTabState.isUploading;
+  const activeSourceFilename = currentTabState.sourceFilename;
 
   // Update active tab state helper
   const updateActiveTabState = (updates: Partial<TabState>) => {
@@ -128,16 +134,67 @@ export default function Home() {
   const fetchCollections = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/collections`);
-      const data = await res.json();
-      setCollections(data.collections || []);
+      if (res.ok) {
+        const data = await res.json();
+        setCollections(data.collections || []);
+      }
     } catch {
       console.error("Failed to fetch collections");
     }
   }, []);
 
-  useEffect(() => {
-    fetchCollections();
+  // Health check to detect Render free-tier cold starts
+  const checkHealth = useCallback(async () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+      const res = await fetch(`${API_BASE}/health`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        setServerStatus("ready");
+        fetchCollections();
+        return true;
+      } else {
+        setServerStatus("waking");
+        return false;
+      }
+    } catch {
+      setServerStatus("waking");
+      return false;
+    }
   }, [fetchCollections]);
+
+  // Initial check & auto-retry polling while waking up
+  useEffect(() => {
+    let active = true;
+    let timer: NodeJS.Timeout;
+
+    const poll = async () => {
+      const isHealthy = await checkHealth();
+      if (!isHealthy && active) {
+        timer = setTimeout(poll, 4000);
+      }
+    };
+
+    poll();
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [checkHealth]);
+
+  // Cold start seconds timer
+  useEffect(() => {
+    if (serverStatus !== "waking") {
+      setColdStartSecs(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setColdStartSecs((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [serverStatus]);
 
   const handleSend = async () => {
     const textToSend = activeInput.trim();
@@ -189,6 +246,8 @@ export default function Home() {
       if (!res.ok) {
         throw new Error(`API error: ${res.status}`);
       }
+
+      setServerStatus("ready");
 
       const contentType = res.headers.get("content-type");
       if (contentType?.includes("application/json")) {
@@ -289,6 +348,8 @@ export default function Home() {
         const error = await res.json();
         throw new Error(error.detail || "Upload failed");
       }
+
+      setServerStatus("ready");
 
       const data = await res.json();
       // ── Write docVersion to the CAPTURED tab, not the currently active tab ──
@@ -636,7 +697,26 @@ export default function Home() {
       </aside>
 
       {/* ═══ Main Chat Area ═══ */}
-      <main className="flex-1 flex flex-col min-w-0 bg-[var(--color-background)]">
+      <main className="flex-1 flex flex-col min-w-0 bg-[var(--color-background)] relative">
+        {/* Render Cold-Start Banner */}
+        {serverStatus === "waking" && (
+          <div className="bg-amber-500/10 border-b border-amber-500/20 px-4 py-2 text-xs flex items-center justify-between text-amber-200 animate-fade-in relative overflow-hidden">
+            <div className="flex items-center gap-2.5 z-10">
+              <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse-subtle" />
+              <span className="font-medium">
+                Waking up Render server... Free tier instances sleep after inactivity ({coldStartSecs}s elapsed)
+              </span>
+            </div>
+            <button
+              onClick={() => checkHealth()}
+              className="text-[11px] bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 px-2 py-0.5 rounded border border-amber-500/30 transition-colors z-10 cursor-pointer"
+            >
+              Check Health
+            </button>
+            <div className="animate-indeterminate-progress bottom-0 left-0 h-[2px] bg-amber-400/60" />
+          </div>
+        )}
+
         {/* Header */}
         <header className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
           <div className="flex items-center gap-3">
@@ -658,6 +738,59 @@ export default function Home() {
               <span className="text-[10px] text-[var(--color-text-muted)] bg-[var(--color-surface-hover)] px-2 py-0.5 rounded-full border border-[var(--color-border)] uppercase tracking-wider font-semibold">
                 {activeTab === "universal" ? "Full Search" : "Filtered RAG"}
               </span>
+            </div>
+          </div>
+
+          {/* Right Header Status Controls */}
+          <div className="flex items-center gap-2.5">
+            {/* Active Document Badge */}
+            {activeSourceFilename && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--color-primary-light)] border border-[var(--color-primary)]/30 text-xs text-white animate-fade-in">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <span className="font-medium text-[11px] truncate max-w-[140px]">{activeSourceFilename}</span>
+                <button
+                  title="Detach active document"
+                  onClick={() => updateActiveTabState({ docVersion: null, sourceFilename: null })}
+                  className="text-[var(--color-text-muted)] hover:text-white ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Live Backend Status Indicator */}
+            <div
+              onClick={() => checkHealth()}
+              className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-[var(--color-surface-hover)] border border-[var(--color-border)] text-xs cursor-pointer hover:border-[var(--color-border-hover)] transition-colors"
+              title="Click to check backend health status"
+            >
+              {serverStatus === "ready" && (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-subtle" />
+                  <span className="text-[11px] font-medium text-emerald-400">Server Online</span>
+                </>
+              )}
+              {serverStatus === "waking" && (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse-subtle" />
+                  <span className="text-[11px] font-medium text-amber-300">Waking Up ({coldStartSecs}s)</span>
+                </>
+              )}
+              {serverStatus === "checking" && (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-zinc-400 animate-pulse-subtle" />
+                  <span className="text-[11px] font-medium text-zinc-400">Connecting...</span>
+                </>
+              )}
+              {serverStatus === "error" && (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-red-400" />
+                  <span className="text-[11px] font-medium text-red-400">Offline</span>
+                </>
+              )}
             </div>
           </div>
         </header>
@@ -789,10 +922,18 @@ export default function Home() {
                         msg.content ? (
                           renderMarkdown(msg.content)
                         ) : (
-                          <div className="flex items-center gap-1.5 h-6">
-                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
-                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
-                            <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-text-muted)]" />
+                          <div className="flex flex-col gap-1.5 py-1">
+                            <div className="flex items-center gap-1.5 h-4">
+                              <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]" />
+                              <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]" />
+                              <span className="typing-dot w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]" />
+                            </div>
+                            {serverStatus === "waking" && (
+                              <p className="text-[11px] text-amber-300/90 font-medium animate-pulse-subtle flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                                Render backend server is spinning up from sleep (~30–50s)...
+                              </p>
+                            )}
                           </div>
                         )
                       ) : (
