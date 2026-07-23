@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { Component as TerminalLoader } from "@/components/ui/sending-loader";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://mutlisouce-agentic-rag-system-1.onrender.com";
 
@@ -800,6 +801,12 @@ export default function Home() {
           {activeMessages.length === 0 ? (
             /* ── Empty State ── */
             <div className="flex flex-col items-center justify-center min-h-full text-center max-w-3xl mx-auto px-4 py-12">
+              {(serverStatus === "waking" || serverStatus === "checking") && (
+                <div className="mb-6 animate-fade-in flex justify-center">
+                  <TerminalLoader text={serverStatus === "waking" ? `Waking Server... ${coldStartSecs}s` : "Connecting..."} />
+                </div>
+              )}
+
               <div className="w-12 h-12 rounded-xl bg-[var(--color-surface)] border border-[var(--color-border)] flex items-center justify-center mb-6 shadow-sm">
                 <span className="text-[var(--color-primary)]">
                   {TABS_INFO[activeTab].icon}

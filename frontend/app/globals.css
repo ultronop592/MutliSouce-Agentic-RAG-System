@@ -155,3 +155,33 @@
 .typing-dot:nth-child(3) {
   animation: typing-dot 1.4s infinite 0.4s;
 }
+
+/* ── Terminal Loader Animation ── */
+@keyframes blinkCursor {
+  50% {
+    border-right-color: transparent;
+  }
+}
+
+@keyframes typeAndDelete {
+  0%,
+  10% {
+    width: 0;
+  }
+  45%,
+  55% {
+    width: 100%;
+  }
+  90%,
+  100% {
+    width: 0;
+  }
+}
+
+.terminal-loader .text {
+  display: inline-block;
+  white-space: nowrap;
+  overflow: hidden;
+  border-right: 2px solid #4ade80;
+  animation: typeAndDelete 4s steps(22) infinite, blinkCursor 0.75s step-end infinite alternate;
+}
