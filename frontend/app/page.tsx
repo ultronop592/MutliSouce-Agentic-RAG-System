@@ -140,6 +140,10 @@ export default function Home() {
     scrollToBottom();
   }, [activeMessages]);
 
+  useEffect(() => {
+    document.title = `${TABS_INFO[activeTab].title} — Agentic RAG System`;
+  }, [activeTab]);
+
   const fetchCollections = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/collections`);
