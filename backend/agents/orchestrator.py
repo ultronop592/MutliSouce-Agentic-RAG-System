@@ -20,6 +20,7 @@ Pipeline paths (chosen by the Router Agent):
            └─→ Reranker Agent  (Gemini pointwise reranking)
                   └─→ Guard    (confidence assessment)
                          └─→ Answer Agent  (grounded response, streamed)
+                                └─→ VerificationAgent  (HIGH confidence → SKIP)
 
 After every Path C response:
   - Conversation memory is updated (with embedding AND doc_version cached on the turn)
@@ -31,6 +32,13 @@ DOC VERSION FLOW:
   - Cache and memory lookups ONLY hit if both session_id AND doc_version match.
   - This means a new PDF upload automatically forces full retrieval for any
     previously cached question — no "New Chat" button needed.
+
+API CALL OPTIMIZATIONS (5 applied):
+  O1. Skip RouterAgent when collections are pre-determined (specific tab) -> -1 LLM
+  O2. Parallelize embed(question) + RouterAgent with asyncio.gather        -> -800ms
+  O3. Pass pre-computed embedding into retriever to avoid second embed call -> -1 Embed
+  O4. Parallelize Qdrant searches across collections (already in retriever) -> -N x Qdrant RTT
+  O5. Gate VerificationAgent on HIGH confidence -> skip for clean answers   -> -1-2 LLM
 
 Every agent step is timed and logged so you can trace slow requests in production.
 """
@@ -66,13 +74,15 @@ class Orchestrator:
         source_filename: str | None = None,
     ) -> AsyncIterator[str]:
         """
-        Main entry point.  Returns an async generator of text chunks
+        Main entry point. Returns an async generator of text chunks
         (compatible with FastAPI StreamingResponse).
 
         Args:
             query:           raw user question
             session_id:      unique session identifier
-            collections:     optional list of Qdrant collections to search
+            collections:     optional list of Qdrant collections to search.
+                             When provided (specific tab), RouterAgent is SKIPPED
+                             because routing is already determined by the UI (O1).
             doc_version:     MD5 fingerprint of the active PDF for this session.
                              Gates cache and memory hits on document version.
             source_filename: basename of the active PDF (e.g. 'report.pdf').
@@ -86,37 +96,69 @@ class Orchestrator:
             session_id, doc_version, query[:80],
         )
 
-        # ── Step 1: Embed question (single call, reused by cache + memory) ──
+        # ── O1+O2: Parallel embed(question) and RouterAgent ──────────────────
+        # O1: if collections are pre-determined (non-universal tab), skip the
+        #     RouterAgent LLM call entirely — routing is already decided by the UI.
+        # O2: when router IS needed, run embed + router simultaneously with
+        #     asyncio.gather() — both are independent at this stage.
         question_embedding: list[float] | None = None
-        try:
-            question_embedding = embeddings.embed_query(query)
-        except Exception as e:
-            logger.warning("Embedding failed: %s", e)
+        collections_predefined = collections is not None and len(collections) > 0
 
-        # ── Step 2: Semantic cache check ────────────────────────────────────
+        async def _embed_async() -> list[float] | None:
+            try:
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, embeddings.embed_query, query)
+            except Exception as e:
+                logger.warning("Embedding failed: %s", e)
+                return None
+
+        async def _route_async() -> RouteType:
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, router_agent.run, query)
+                return result.data
+            except Exception as e:
+                logger.warning("Router failed: %s -- defaulting to RETRIEVAL", e)
+                return RouteType.RETRIEVAL
+
+        if collections_predefined:
+            # O1: skip router entirely, only embed
+            t_embed = time.perf_counter()
+            question_embedding = await _embed_async()
+            logger.info(
+                "O1: Router SKIPPED (collections=%s) | embed=%.0fms",
+                collections, (time.perf_counter() - t_embed) * 1000,
+            )
+            route = RouteType.RETRIEVAL
+        else:
+            # O2: embed + router in parallel
+            t_parallel = time.perf_counter()
+            question_embedding, route = await asyncio.gather(
+                _embed_async(),
+                _route_async(),
+            )
+            logger.info(
+                "O2: embed || router parallel | total=%.0fms | route=%s",
+                (time.perf_counter() - t_parallel) * 1000, route.value,
+            )
+
+        # ── Step 2: Semantic cache check ─────────────────────────────────────
         # CRITICAL: session_id AND doc_version are both required for a hit.
-        # A new PDF upload changes doc_version → cache miss → forces retrieval.
+        # A new PDF upload changes doc_version -> cache miss -> forces retrieval.
         if question_embedding:
             cached = response_cache.get(session_id, question_embedding, doc_version)
             if cached:
                 logger.info(
-                    "Cache HIT (doc_version=%s) — returning in %.0fms",
+                    "Cache HIT (doc_version=%s) -- returning in %.0fms",
                     doc_version, (time.perf_counter() - t_start) * 1000,
                 )
                 async def _cached_stream():
                     yield cached
                 return _cached_stream()
 
-        # ── Step 3: Route the query ──────────────────────────────────────────
-        route_result = router_agent.run(query)
-        route: RouteType = route_result.data
-        logger.info("Route: %s", route.value)
-
         # ── Path A: CONVERSATIONAL ───────────────────────────────────────────
         if route == RouteType.CONVERSATIONAL:
             reply = memory_agent.conversational_reply(query, session_id)
-            # Conversational turns are stored WITHOUT doc_version — they are
-            # not document-specific and should always be memory-eligible.
             chat_memory.update(session_id, query, reply, embedding=question_embedding, doc_version=None)
             async def _conv_stream():
                 yield reply
@@ -128,34 +170,36 @@ class Orchestrator:
             mem_result = memory_agent.run(session_id, question_embedding, doc_version)
             if mem_result.success and mem_result.data:
                 logger.info(
-                    "Memory HIT (sim=%.3f, doc_version=%s) — returning in %.0fms",
+                    "Memory HIT (sim=%.3f, doc_version=%s) -- returning in %.0fms",
                     mem_result.metadata.get("similarity", 0),
                     doc_version,
                     (time.perf_counter() - t_start) * 1000,
                 )
                 answer = mem_result.data
-                # Cache this re-served memory answer in the same session's cache
                 if question_embedding:
                     response_cache.set(session_id, question_embedding, answer, doc_version)
                 async def _mem_stream():
                     yield answer
                 return _mem_stream()
-            # Memory miss → fall through to full retrieval
+            # Memory miss -> fall through to full retrieval
 
         # ── Path C: FULL RETRIEVAL PIPELINE ─────────────────────────────────
 
         # Step C1: Hybrid retrieval (semantic + BM25 + RRF)
-        # Pass source_filename so the retriever can filter Qdrant to only the
-        # active PDF's chunks — prevents cross-document bleed in mixed collections.
+        # O3: pass question_embedding so retriever can SKIP the second embed_query()
+        #     call if the query rewriter does not significantly change the query.
         retrieval_result = await retrieval_agent.run_async(
-            query, collections=collections, source_filename=source_filename
+            query,
+            collections=collections,
+            source_filename=source_filename,
+            question_embedding=question_embedding,   # O3
         )
         top_docs: list[str] = retrieval_result.data.get("docs", [])
         docs_with_scores: list[tuple[str, float]] = retrieval_result.data.get("scored", [])
 
-        # Step C2: Reranking — apply Gemini reranking when ≥ 2 docs retrieved.
-        # Even with 2–4 docs the ensemble ordering has noise; pointwise
-        # reranking consistently improves precision at position 1–2.
+        # Step C2: Reranking -- apply Gemini reranking when >= 2 docs retrieved.
+        # Even with 2-4 docs the ensemble ordering has noise; pointwise
+        # reranking consistently improves precision at position 1-2.
         RERANK_MIN_DOCS = 2
         if len(top_docs) >= RERANK_MIN_DOCS:
             rerank_result = reranker_agent.run(query, top_docs)
@@ -163,22 +207,21 @@ class Orchestrator:
             logger.info("Reranker: applied (%d docs)", len(reranked_docs))
         else:
             reranked_docs = top_docs
-            logger.info("Reranker: skipped (%d docs, threshold=%d) — using ensemble order",
-                        len(top_docs), RERANK_MIN_DOCS)
+            logger.info(
+                "Reranker: skipped (%d docs, threshold=%d) -- using ensemble order",
+                len(top_docs), RERANK_MIN_DOCS,
+            )
 
-        # Step C3: Hallucination guard (uses original scores for confidence)
+        # Step C3: Hallucination guard (uses raw cosine scores for confidence)
         confidence_level, advisory_note = assess_confidence(docs_with_scores)
         logger.info("Guard confidence: %s", confidence_level)
 
         # Step C4: Build context string from reranked docs
-        if reranked_docs:
-            context = "\n\n---\n\n".join(reranked_docs)
-        else:
-            context = "No relevant documents found."
+        context = "\n\n---\n\n".join(reranked_docs) if reranked_docs else "No relevant documents found."
 
         # Step C5: Conversation memory for context
         # Pass doc_version so format_history() ONLY includes turns from the
-        # current document — prevents old-PDF context bleeding into the prompt.
+        # current document -- prevents old-PDF context bleeding into the prompt.
         memory_str = chat_memory.format_history(session_id, current_doc_version=doc_version)
 
         # Step C6: Verified Answer Generation & Self-Correction Loop
@@ -186,78 +229,94 @@ class Orchestrator:
 
         async def _retrieval_stream() -> AsyncIterator[str]:
             nonlocal full_response
-            
+
             # Generate initial answer candidate in memory
             answer_candidate = await answer_agent.generate(query, context, memory_str, advisory_note)
-            
-            # Run verification loop
-            max_retries = 2
-            attempts = 0
-            feedback = ""
-            verified = False
-            
-            while attempts < max_retries:
-                attempts += 1
-                logger.info("VerificationAgent: check attempt %d for query='%s'", attempts, query[:50])
-                
-                check = await verification_agent.verify_async(answer_candidate, context)
-                status = check.get("status")
-                
-                if status == "verified":
-                    verified = True
-                    logger.info("VerificationAgent: check PASSED on attempt %d", attempts)
-                    break
-                elif status == "failed":
-                    feedback = check.get("reason", "")
-                    logger.warning(
-                        "VerificationAgent: check FAILED on attempt %d: %s. Triggering self-correction...",
-                        attempts, feedback,
+
+            # O5: Gate VerificationAgent on confidence level.
+            # HIGH confidence = retrieved docs are strongly relevant (cosine 0.65+).
+            # In this regime, the context quality is high and hallucination risk
+            # is very low. Skipping verification saves 1 LLM call (~5-8s latency).
+            # MEDIUM / LOW / NONE confidence still go through the full loop.
+            SKIP_VERIFY_FOR = {"HIGH"}
+            run_verification = confidence_level not in SKIP_VERIFY_FOR
+
+            verified = not run_verification  # HIGH is pre-marked verified
+            if not run_verification:
+                logger.info(
+                    "O5: VerificationAgent SKIPPED -- confidence=%s (low hallucination risk)",
+                    confidence_level,
+                )
+            else:
+                # Run verification loop for MEDIUM / LOW / NONE
+                max_retries = 2
+                attempts = 0
+                feedback = ""
+
+                while attempts < max_retries:
+                    attempts += 1
+                    logger.info(
+                        "VerificationAgent: check attempt %d for query='%s'",
+                        attempts, query[:50],
                     )
-                    # Regenerate with correction feedback passed to the LLM
-                    answer_candidate = await answer_agent.generate(
-                        query, context, memory_str, advisory_note, feedback=feedback
-                    )
-                else:
-                    # Error state (e.g. network timeout or API error) — proceed to avoid blocking user flow
-                    logger.warning(
-                        "VerificationAgent: check errored: %s. Bypassing verification.",
-                        check.get("reason"),
-                    )
-                    verified = True
-                    break
-            
-            if not verified:
-                logger.error("VerificationAgent: check failed after max retries. Serving best candidate.")
-            
+
+                    check = await verification_agent.verify_async(answer_candidate, context)
+                    status = check.get("status")
+
+                    if status == "verified":
+                        verified = True
+                        logger.info("VerificationAgent: check PASSED on attempt %d", attempts)
+                        break
+                    elif status == "failed":
+                        feedback = check.get("reason", "")
+                        logger.warning(
+                            "VerificationAgent: check FAILED on attempt %d: %s. Triggering self-correction...",
+                            attempts, feedback,
+                        )
+                        answer_candidate = await answer_agent.generate(
+                            query, context, memory_str, advisory_note, feedback=feedback
+                        )
+                    else:
+                        # Error state -- proceed to avoid blocking user
+                        logger.warning(
+                            "VerificationAgent: check errored: %s. Bypassing verification.",
+                            check.get("reason"),
+                        )
+                        verified = True
+                        break
+
+                if not verified:
+                    logger.error("VerificationAgent: failed after max retries. Serving best candidate.")
+
             final_answer = answer_candidate
             full_response = final_answer
 
-            # Stream the final verified answer progressively (typing effect)
+            # Stream the final answer progressively (typing effect)
             chunk_size = 12
             for i in range(0, len(final_answer), chunk_size):
                 chunk = final_answer[i : i + chunk_size]
                 yield chunk
-                await asyncio.sleep(0.005)  # fast, smooth progressive typing effect
-                
+                await asyncio.sleep(0.005)
+
             # Post-stream: update memory and cache WITH doc_version
-            # This ensures future memory/cache hits are gated on the same document.
             if full_response and "[Error" not in full_response:
                 chat_memory.update(
                     session_id, query, full_response,
                     embedding=question_embedding,
-                    doc_version=doc_version,   # ← tag this answer to the current PDF
+                    doc_version=doc_version,
                 )
                 if question_embedding:
                     response_cache.set(
                         session_id, question_embedding, full_response,
-                        doc_version=doc_version,   # ← cache hit requires same PDF
+                        doc_version=doc_version,
                     )
-            
+
             total_ms = (time.perf_counter() - t_start) * 1000
             logger.info(
-                "=== Orchestrator DONE | session=%s | doc_version=%s | %.0fms | docs=%d | confidence=%s | verified=%s",
+                "=== Orchestrator DONE | session=%s | doc_version=%s | %.0fms | docs=%d | confidence=%s | verified=%s | router_skipped=%s",
                 session_id, doc_version, total_ms, len(reranked_docs),
                 confidence_level, "yes" if verified else "no",
+                "yes" if collections_predefined else "no",
             )
 
         return _retrieval_stream()

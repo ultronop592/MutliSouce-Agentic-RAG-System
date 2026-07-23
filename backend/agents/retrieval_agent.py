@@ -48,16 +48,21 @@ class RetrievalAgent(BaseAgent):
         query: str,
         collections: list[str] | None = None,
         source_filename: str | None = None,
+        question_embedding: list[float] | None = None,
     ) -> AgentResult:
         """
         Async version — called by the orchestrator directly.
 
         Args:
-            query:           user question (already rewritten by the retriever)
-            collections:     Qdrant collection names to search (None → planner decides)
-            source_filename: optional PDF basename to filter results to only this file.
-                             Prevents cross-document chunk bleed when multiple PDFs
-                             have been ingested into the same collection.
+            query:              user question (may be rewritten inside the retriever)
+            collections:        Qdrant collection names to search (None -> planner decides)
+            source_filename:    optional PDF basename to filter results to only this file.
+                                Prevents cross-document chunk bleed when multiple PDFs
+                                have been ingested into the same collection.
+            question_embedding: optional pre-computed embedding of the original query.
+                                When provided, the retriever can skip the second
+                                embed_query() call if the query rewriter returns the
+                                same text (Optimization O3: -1 Embedding API call).
         """
         import time
         t0 = time.perf_counter()
@@ -65,11 +70,15 @@ class RetrievalAgent(BaseAgent):
             if collections is None:
                 collections = planner(query)
             logger.info(
-                "RetrievalAgent routing to: %s | source_filter: %s",
+                "RetrievalAgent routing to: %s | source_filter: %s | pre_embedded: %s",
                 collections, source_filename or "none",
+                "yes" if question_embedding is not None else "no",
             )
             top_docs, docs_with_scores = await hybrid_retrieve(
-                query, collections, source_filename=source_filename
+                query,
+                collections,
+                source_filename=source_filename,
+                question_embedding=question_embedding,   # O3: forward pre-computed embedding
             )
             latency = (time.perf_counter() - t0) * 1000
             logger.info(

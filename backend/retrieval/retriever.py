@@ -184,39 +184,57 @@ async def hybrid_retrieve(
     query: str,
     selected: list[str],
     source_filename: str | None = None,
+    question_embedding: list[float] | None = None,
 ) -> tuple[list[str], list[tuple[str, float]]]:
     """
     Full hybrid retrieval pipeline.
 
     Args:
-        query:           raw user question
-        selected:        list of Qdrant collection names to search
-        source_filename: optional PDF basename to restrict retrieval to.
-                         When set, both Qdrant vector search and BM25 results
-                         are filtered to only chunks from this specific file.
-                         This prevents the Universal tab from mixing chunks
-                         from multiple PDFs that share the same collection.
+        query:              raw user question
+        selected:           list of Qdrant collection names to search
+        source_filename:    optional PDF basename to restrict retrieval to.
+                            When set, both Qdrant vector search and BM25 results
+                            are filtered to only chunks from this specific file.
+        question_embedding: optional pre-computed embedding of the original query
+                            from the orchestrator (O3 optimization).
+                            When the query rewriter returns an UNCHANGED query, this
+                            embedding is reused directly — saving one embed_query()
+                            API call (~300-600ms). When the query IS rewritten, a new
+                            embedding is computed for the rewritten form.
 
     Returns:
         (top_docs, docs_with_scores)
-        - top_docs         : list[str]                — texts for LLM prompt
-        - docs_with_scores : list[tuple[str, float]]  — for hallucination guard
+        - top_docs         : list[str]                -- texts for LLM prompt
+        - docs_with_scores : list[tuple[str, float]]  -- for hallucination guard
     """
     # ── Step 1: Query rewriting ──────────────────────────────────────────────
     rewritten = rewrite_query(query)
-    logger.debug("Query rewritten: '%s' → '%s'", query, rewritten)
+    logger.debug("Query rewritten: '%s' -> '%s'", query, rewritten)
 
-    # ── Step 2: Single embedding, parallel semantic search ───────────────────────
-    query_vector = embeddings.embed_query(rewritten)
+    # ── Step 2: Embedding — reuse if query unchanged (O3) ────────────────────
+    query_unchanged = (rewritten.strip().lower() == query.strip().lower())
+    if query_unchanged and question_embedding is not None:
+        # O3: reuse the pre-computed embedding from the orchestrator.
+        # This saves one embed_query() API call when the rewriter makes no change.
+        query_vector = question_embedding
+        logger.info("O3: Embedding REUSED from orchestrator (query unchanged)")
+    else:
+        # Query was rewritten — must embed the new form for accurate vector search
+        query_vector = embeddings.embed_query(rewritten)
+        if question_embedding is not None:
+            logger.info("O3: Embedding RE-COMPUTED (query was rewritten: '%s')", rewritten[:60])
 
-    # Pass source_filename to each collection's semantic search
+    # ── Step 3: Parallel Qdrant semantic search across all collections (O4) ───
+    # asyncio.gather fires all collection queries simultaneously.
+    # For universal tab with 5 collections this reduces Qdrant latency from
+    # 5x sequential RTT to 1x RTT — typically saves 400-800ms.
     tasks = [
         _semantic_search_collection(c, query_vector, source_filename=source_filename)
         for c in selected
     ]
     semantic_results_per_col = await asyncio.gather(*tasks)
 
-    # Map collection → semantic hits
+    # Map collection -> semantic hits
     per_collection: dict[str, list[tuple[str, float]]] = {
         col: hits
         for col, hits in zip(selected, semantic_results_per_col)
@@ -228,7 +246,7 @@ async def hybrid_retrieve(
         total_semantic, len(selected), source_filename or "none",
     )
 
-    # ── Step 3 + 4: BM25 search + Ensemble + RRF fusion ───────────────────────
+    # ── Step 4+5: BM25 search + Ensemble + RRF fusion + Deduplication ────────
     fused: list[tuple[str, float]] = fuse_all_collections(
         per_collection, rewritten, source_filename=source_filename
     )
@@ -239,7 +257,7 @@ async def hybrid_retrieve(
     top_docs = [text for text, _ in fused]
 
     # ── Guard scores: use RAW COSINE similarities, NOT fused RRF scores ────────
-    # RRF stability scores are always ~0.015–0.016 regardless of relevance.
+    # RRF stability scores are always ~0.015-0.016 regardless of relevance.
     # The guard needs REAL relevance signals (cosine 0-1) to correctly classify
     # HIGH vs LOW vs NONE confidence.
     all_semantic: list[tuple[str, float]] = []
