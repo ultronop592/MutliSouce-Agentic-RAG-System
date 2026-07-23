@@ -153,10 +153,10 @@ class Orchestrator:
         top_docs: list[str] = retrieval_result.data.get("docs", [])
         docs_with_scores: list[tuple[str, float]] = retrieval_result.data.get("scored", [])
 
-        # Step C2: Reranking — only if enough docs to meaningfully reorder
-        # Reranking adds ~10s (one extra Gemini call). With <=4 docs the ensemble
-        # ordering is already high quality, so skip it to save latency.
-        RERANK_MIN_DOCS = 5
+        # Step C2: Reranking — apply Gemini reranking when ≥ 2 docs retrieved.
+        # Even with 2–4 docs the ensemble ordering has noise; pointwise
+        # reranking consistently improves precision at position 1–2.
+        RERANK_MIN_DOCS = 2
         if len(top_docs) >= RERANK_MIN_DOCS:
             rerank_result = reranker_agent.run(query, top_docs)
             reranked_docs: list[str] = rerank_result.data if rerank_result.success else top_docs

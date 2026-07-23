@@ -96,22 +96,57 @@ def _bm25_search_all(
 
 # ── Main fusion entry point ───────────────────────────────────────────────────
 
+def _jaccard(a: str, b: str, max_tokens: int = 200) -> float:
+    """Fast Jaccard token overlap for near-duplicate detection.
+    Operates on the first max_tokens words to keep it O(1) per pair.
+    Returns 0.0–1.0. Values > 0.80 indicate near-identical chunks.
+    """
+    ta = set(a.lower().split()[:max_tokens])
+    tb = set(b.lower().split()[:max_tokens])
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _deduplicate(
+    docs: list[tuple[str, float]],
+    jaccard_threshold: float = 0.80,
+) -> list[tuple[str, float]]:
+    """
+    Remove near-duplicate chunks from the fused result list.
+
+    When multiple PDFs or overlapping chunks produce nearly identical text
+    segments, sending them all to the LLM wastes context window and can
+    cause the model to focus on repeated content at the expense of diversity.
+
+    Algorithm: greedy O(n²) over the small FINAL_TOP_K list.
+    For each chunk, compare Jaccard similarity against all already-kept chunks.
+    If similarity > threshold, drop it (the higher-ranked version is already kept).
+    """
+    kept: list[tuple[str, float]] = []
+    for text, score in docs:
+        is_dup = any(_jaccard(text, kept_text) > jaccard_threshold for kept_text, _ in kept)
+        if not is_dup:
+            kept.append((text, score))
+    return kept
+
+
 def fuse_all_collections(
     per_collection_semantic: dict[str, list[tuple[str, float]]],
     query: str,
     source_filename: str | None = None,
 ) -> list[tuple[str, float]]:
     """
-    Full two-stage fusion: Ensemble Combiner → RRF Stability Layer.
+    Full three-stage fusion: Ensemble Combiner → RRF Stability → Deduplication.
 
     Args:
-        per_collection_semantic: {collection: [(text, semantic_score), ...]}
+        per_collection_semantic: {collection: [(text, semantic_score), ...]}\
                                   Results from Qdrant vector search (post-threshold).
         query:                    Rewritten search query (used for BM25 search).
         source_filename:          Optional: passed to BM25 search for logging/context.
 
     Returns:
-        [(text, final_score), ...] globally ranked and capped to FINAL_TOP_K.
+        [(text, final_score), ...] globally ranked, deduplicated, capped to FINAL_TOP_K.
     """
     selected = list(per_collection_semantic.keys())
 
@@ -129,7 +164,7 @@ def fuse_all_collections(
     ensemble_results = ensemble_combine_multi_collection(
         per_collection_semantic=per_collection_semantic,
         per_collection_bm25=per_collection_bm25,
-        top_k=FINAL_TOP_K * 2,   # give RRF stage more candidates to work with
+        top_k=FINAL_TOP_K * 3,   # fetch extra candidates so dedup doesn't shrink below FINAL_TOP_K
     )
 
     if not ensemble_results:
@@ -140,7 +175,19 @@ def fuse_all_collections(
     # ── Stage 2: RRF Stability Layer ─────────────────────────────────────────
     final = _rrf_stability(ensemble_results)
     final.sort(key=lambda x: x[1], reverse=True)
+
+    # ── Stage 3: Near-duplicate deduplication ─────────────────────────────────
+    # Chunks with > 80% Jaccard token overlap are collapsed to the highest-ranked one.
+    # This prevents the LLM context window from being saturated with repeated content
+    # (common when multiple PDFs or overlapping chunk windows land in the same result set).
+    before_dedup = len(final)
+    final = _deduplicate(final, jaccard_threshold=0.80)
     final = final[:FINAL_TOP_K]
+    if len(final) < before_dedup:
+        logger.info(
+            "Deduplication: removed %d near-duplicate chunks (%d → %d)",
+            before_dedup - len(final), before_dedup, len(final),
+        )
 
     logger.info(
         "Fusion complete: %d final docs | top=%.6f | bottom=%.6f",

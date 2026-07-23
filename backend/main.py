@@ -52,25 +52,46 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: verify Qdrant, pre-load BM25 indexes from existing documents."""
+    import asyncio
     logger.info("=== RAG Backend starting up ===")
 
-    # 1. Ensure Qdrant collections exist
-    try:
-        ensure_collections()
-        logger.info("Qdrant collections verified")
-    except Exception as e:
-        logger.warning("Qdrant connection warning: %s", e)
+    # 1. Ensure Qdrant collections exist — retry up to 3× with backoff.
+    #    Qdrant cloud can be slow to respond on a cold Render instance start.
+    for attempt in range(1, 4):
+        try:
+            ensure_collections()
+            logger.info("Qdrant collections verified (attempt %d)", attempt)
+            break
+        except Exception as e:
+            logger.warning("Qdrant connection attempt %d/3 failed: %s", attempt, e)
+            if attempt < 3:
+                await asyncio.sleep(2 * attempt)  # 2s, 4s back-off
+            else:
+                logger.error("Qdrant unavailable after 3 attempts — continuing without collections")
 
-    # 2. Pre-load BM25 indexes from ALL existing Qdrant documents.
+    # 2. Pre-load BM25 indexes — retry up to 3× with backoff.
     #    Without this, BM25 search returns nothing until the first upload.
-    try:
-        counts = bm25_manager.refresh_all(COLLECTIONS)
-        for col, n in counts.items():
-            if n > 0:
-                logger.info("BM25 index loaded: '%s' — %d docs", col, n)
-        logger.info("BM25 indexes ready")
-    except Exception as e:
-        logger.warning("BM25 index warning: %s", e)
+    #    On Render restarts Qdrant may need a moment before scroll() works.
+    for attempt in range(1, 4):
+        try:
+            counts = bm25_manager.refresh_all(COLLECTIONS)
+            for col, n in counts.items():
+                if n > 0:
+                    logger.info("BM25 index loaded: '%s' — %d docs", col, n)
+            loaded = sum(n for n in counts.values() if n > 0)
+            if loaded > 0:
+                logger.info("BM25 indexes ready (%d total docs, attempt %d)", loaded, attempt)
+                break
+            else:
+                # All collections empty (no PDFs uploaded yet) — not an error
+                logger.info("BM25 indexes ready — collections empty (no PDFs uploaded yet)")
+                break
+        except Exception as e:
+            logger.warning("BM25 index load attempt %d/3 failed: %s", attempt, e)
+            if attempt < 3:
+                await asyncio.sleep(2 * attempt)
+            else:
+                logger.error("BM25 index could not be loaded after 3 attempts — keyword search disabled until first upload")
 
     logger.info("=== RAG Backend ready ===")
     yield

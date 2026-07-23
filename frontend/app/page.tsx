@@ -97,6 +97,14 @@ export default function Home() {
 
   const [collections, setCollections] = useState<CollectionInfo[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const handleCopy = (id: string, text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  };
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -661,10 +669,30 @@ export default function Home() {
                 )}
               </div>
               {activeUploadStatus && (
-                <div className="mt-2 px-2 py-1.5 rounded bg-[var(--color-surface-hover)] text-[10px] text-center text-white break-words max-h-24 overflow-y-auto">
-                  {activeUploadStatus}
+                <div className={`mt-2 px-2.5 py-2 rounded-lg text-[11px] break-words max-h-32 overflow-y-auto flex items-start gap-2 animate-fade-in ${
+                  activeUploadStatus.toLowerCase().startsWith("upload failed") || activeUploadStatus.toLowerCase().startsWith("only pdf")
+                    ? "bg-red-500/10 border border-red-500/20 text-red-200"
+                    : "bg-emerald-500/10 border border-emerald-500/20 text-emerald-100"
+                }`}>
+                  {activeUploadStatus.toLowerCase().startsWith("upload failed") || activeUploadStatus.toLowerCase().startsWith("only pdf") ? (
+                    <svg className="flex-shrink-0 mt-0.5" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                  ) : (
+                    <svg className="flex-shrink-0 mt-0.5" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                  )}
+                  <span className="leading-relaxed">{activeUploadStatus}</span>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Persistent active file badge when upload panel is closed */}
+          {!activeShowUpload && activeSourceFilename && (
+            <div className="px-3 pb-2 animate-fade-in">
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-primary-light)] border border-[var(--color-primary)]/30 text-[11px] text-white">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <span className="truncate flex-1 font-medium">{activeSourceFilename}</span>
+                <span className="text-emerald-400 text-[10px]">Active</span>
+              </div>
             </div>
           )}
 
@@ -920,14 +948,51 @@ export default function Home() {
                   </div>
 
                   {/* Message Content */}
-                  <div className="flex-1 min-w-0 pt-1.5">
-                    <div className="font-medium text-sm text-[var(--color-primary)] mb-1">
-                      {msg.role === "assistant" ? `${TABS_INFO[activeTab].title} Assistant` : "You"}
+                  <div className="flex-1 min-w-0 pt-1.5 group">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="font-medium text-sm text-[var(--color-primary)]">
+                        {msg.role === "assistant" ? `${TABS_INFO[activeTab].title} Assistant` : "You"}
+                      </div>
+                      {/* Copy button — only shown for completed assistant messages */}
+                      {msg.role === "assistant" && msg.content && !msg.content.startsWith("Error:") && (
+                        <button
+                          onClick={() => handleCopy(msg.id, msg.content)}
+                          title="Copy response"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)] hover:text-white px-2 py-0.5 rounded border border-transparent hover:border-[var(--color-border)] cursor-pointer"
+                        >
+                          {copiedId === msg.id ? (
+                            <>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                              <span className="text-[var(--color-primary)] font-medium">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                     <div className={`text-[15px] leading-relaxed text-white`}>
                       {msg.role === "assistant" ? (
                         msg.content ? (
-                          renderMarkdown(msg.content)
+                          <>
+                            {renderMarkdown(msg.content)}
+                            {/* Retry button on error messages */}
+                            {msg.content.startsWith("Error:") && (
+                              <button
+                                onClick={() => {
+                                  updateActiveTabState({ input: activeMessages.find(m => m.id !== msg.id && m.role === "user")?.content ?? "" });
+                                  inputRef.current?.focus();
+                                }}
+                                className="mt-3 flex items-center gap-2 text-[12px] text-[var(--color-text-muted)] hover:text-white border border-[var(--color-border)] hover:border-[var(--color-border-hover)] px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-5.5"/></svg>
+                                Try again
+                              </button>
+                            )}
+                          </>
                         ) : (
                           <div className="flex flex-col gap-1.5 py-1">
                             <div className="flex items-center gap-1.5 h-4">
