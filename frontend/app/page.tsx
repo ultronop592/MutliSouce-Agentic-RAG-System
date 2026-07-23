@@ -564,8 +564,10 @@ export default function Home() {
                   return (
                     <button
                       key={tabKey}
-                      onClick={() => setActiveTab(tabKey as any)}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-200 cursor-pointer ${
+                      onClick={() => {
+                        setActiveTab(tabKey as any);
+                        setTimeout(() => inputRef.current?.focus(), 50);
+                      }}                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-200 cursor-pointer ${
                         isActive
                           ? "bg-[var(--color-surface-hover)] border border-[var(--color-border)] text-white"
                           : "hover:bg-[var(--color-surface-hover)]/40 border border-transparent text-[var(--color-text-secondary)]"
@@ -716,8 +718,12 @@ export default function Home() {
                 </div>
               ))}
               {collections.length === 0 && (
-                <p className="col-span-2 text-[10px] text-[var(--color-text-dim)] px-1">
-                  Connecting to database...
+                <p className="col-span-2 text-[10px] px-1 flex items-center gap-1.5">
+                  {serverStatus === "ready" ? (
+                    <span className="text-[var(--color-text-dim)]">No documents uploaded yet</span>
+                  ) : (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-pulse-subtle flex-shrink-0" /><span className="text-[var(--color-text-dim)]">Connecting...</span></>
+                  )}
                 </p>
               )}
             </div>
@@ -1055,9 +1061,17 @@ export default function Home() {
               )}
             </button>
           </div>
-          <p className="text-center text-[11px] text-[var(--color-text-dim)] mt-3">
-            AI can make mistakes. Check important info.
-          </p>
+          <div className="flex items-center justify-center gap-4 mt-3">
+            <p className="text-[11px] text-[var(--color-text-dim)]">
+              AI can make mistakes. Check important info.
+            </p>
+            <span className="text-[var(--color-text-dim)] text-[10px]">·</span>
+            <p className="text-[11px] text-[var(--color-text-dim)]">
+              <kbd className="px-1 py-0.5 rounded border border-[var(--color-border)] text-[10px] font-mono">Enter</kbd> send
+              {" · "}
+              <kbd className="px-1 py-0.5 rounded border border-[var(--color-border)] text-[10px] font-mono">Shift+Enter</kbd> newline
+            </p>
+          </div>
         </div>
       </main>
     </div>
