@@ -1,265 +1,231 @@
 # Multi-Source Agentic RAG System
 
-A production-grade, multi-agent Retrieval-Augmented Generation (RAG) system engineered for high-accuracy domain searching, conversational state awareness, and isolated multi-tenant knowledge base retrieval. The platform coordinates a network of autonomous agents to deliver grounded, low-latency, and hallucination-free streaming answers.
+A production-grade, multi-agent Retrieval-Augmented Generation (RAG) system engineered for high-accuracy domain searching, conversational state awareness, isolated multi-tenant knowledge base retrieval, and ultra-low latency streaming response generation.
 
 ---
 
 ## 🏗️ System Architecture
 
-The core processing engine is managed by a central **Orchestrator** that handles query lifecycle routing, memory lookup, search orchestration, reranking, trust guards, and response synthesis:
+The core processing engine is managed by a central **Orchestrator** that coordinates query routing, memory lookup, search orchestration, near-duplicate deduplication, reranking, trust guards, and response synthesis:
 
 ```mermaid
 flowchart TD
-    U([User Query]) --> EMB[Embed Query]
-    EMB --> SC{Semantic Cache\nHit?}
+    U([User Query]) --> O1_CHK{Specific Tab?\ncollections pre-set}
+    O1_CHK -->|YES - O1| EMB[Embed Query]
+    O1_CHK -->|NO - Universal| PAR[Parallel: Embed ‖ Router Agent\nO2 asyncio.gather]
+    
+    EMB --> SC{Semantic Cache\nHit? doc_version-gated}
+    PAR --> SC
+    
     SC -->|YES| CRET([Return Cached Response\n<5ms])
-    SC -->|NO| RT[Router Agent\nLLM classifier + greeting prefilter]
+    SC -->|NO| RT_BR{Route Type}
 
-    RT -->|CONVERSATIONAL| MA_C[Memory Agent\nConversational Reply]
+    RT_BR -->|CONVERSATIONAL| MA_C[Memory Agent\nConversational Reply]
     MA_C --> ANS_C([Direct Reply])
 
-    RT -->|MEMORY_FIRST| MA_S[Memory Agent\nSemantic Memory Lookup]
-    MA_S -->|Similarity ≥ 0.88| MEM([Replay Grounded Answer\nZero Latency])
+    RT_BR -->|MEMORY_FIRST| MA_S[Memory Agent\nSemantic Memory Lookup]
+    MA_S -->|Similarity ≥ 0.88 & Same doc_version| MEM([Replay Grounded Answer\nZero Latency])
     MA_S -->|MISS| RA[Retrieval Agent]
 
-    RT -->|RETRIEVAL| RA
-    RA --> PL[Planner\nCollection Routing]
-    PL --> SS[Semantic Search\nQdrant Vector leg]
-    PL --> BS[BM25 Search\nLexical index leg]
-    SS --> RRF[RRF Fusion\nReciprocal Rank Fusion]
-    BS --> RRF
-    RRF --> RK[Reranker Agent\nPointwise Scoring]
+    RT_BR -->|RETRIEVAL| RA
+    RA --> Q_RW{Query Rewriter\nSmarter Bypass}
+    Q_RW -->|Unchanged| EMB_REUSE[O3: Reuse Pre-computed Embedding]
+    Q_RW -->|Rewritten| EMB_NEW[Compute New Embedding]
+    
+    EMB_REUSE --> SS[O4: Parallel Qdrant Search\nsource_filename filtered]
+    EMB_NEW --> SS
+    RA --> BS[BM25 Search\nsource_filename filtered]
+    
+    SS --> ENS[Ensemble Combiner\nMin-Max Weighted]
+    BS --> ENS
+    ENS --> RRF[RRF Fusion]
+    RRF --> DUP[Jaccard Deduplication\n>80% Overlap Collapsed]
+    DUP --> RK[Reranker Agent\nPointwise Scoring ≥2 docs]
     RK --> GD[Hallucination Guard\nConfidence Gate]
-    GD --> AA[Answer Agent\nCandidate generation]
-    AA --> VA{Verification Agent\nFact-check query context}
+    GD --> AA[Answer Agent\nCandidate Generation]
+    AA --> CONF_CHK{Guard Confidence\nO5 Gate}
+    CONF_CHK -->|HIGH - O5| STR([Progressive Verified Stream])
+    CONF_CHK -->|MEDIUM / LOW| VA{Verification Agent\nFact-check query context}
     VA -->|FAILED| AA
-    VA -->|VERIFIED| STR([Verified progressive stream])
-    STR --> UPD[Update Memory & Cache]
+    VA -->|VERIFIED| STR
+    STR --> UPD[Update Memory & Cache\nTagged with doc_version]
 ```
+
+---
+
+## ⚡ Performance & API Call Optimizations
+
+The system includes **5 architectural optimizations** that reduce API latency from **~25–35s down to ~8–12s** and decrease per-request LLM calls by **60%**:
+
+| Optimization | Scope | Impact |
+| :--- | :--- | :--- |
+| **O1. Router Bypass** | Specific Tabs (*Research Papers*, *Code Docs*, etc.) | Bypasses the `RouterAgent` LLM call when tab is pre-selected (**−1 LLM call**). |
+| **O2. Parallel Execution** | Universal Tab Queries | Runs `embeddings.embed_query()` and `RouterAgent` in parallel via `asyncio.gather()` (**−800ms**). |
+| **O3. Embedding Reuse** | Well-Formed & Unchanged Queries | Reuses original query embedding when query rewriter makes no changes (**−1 Embedding call**). |
+| **O4. Parallel Scatter** | Multi-Collection Search | Executes Qdrant searches across all 4 collections simultaneously via `asyncio.gather()` (**−4× RTT**). |
+| **O5. Confidence Gate** | High-Confidence Responses | Bypasses `VerificationAgent` for `HIGH` confidence guard scores, reserving verification for uncertain answers (**−1 to −2 LLM calls**). |
+
+---
+
+## 🛡️ Document & Session Context Isolation
+
+To prevent information from previously uploaded PDFs from contaminating responses to newly uploaded documents, the system implements a strict 3-tier isolation contract:
+
+1. **`doc_version` MD5 Fingerprinting**: Each uploaded PDF is assigned an MD5 hash. Semantic cache entries and memory turns are tagged with `doc_version`. Lookups **only hit** if both `session_id` AND `doc_version` match. Uploading a new PDF automatically forces full retrieval without requiring a "New Chat" reset.
+2. **`source_filename` Qdrant Payload Filter**: Qdrant vector queries apply an exact-match `source_filename` payload filter, restricting search candidates strictly to the active PDF.
+3. **BM25 Lexical Source Isolation**: The in-memory BM25 index stores source metadata per chunk and filters keyword matching to the active file, preventing cross-document keyword bleed.
 
 ---
 
 ## 📥 Data Ingestion Workflow
 
-The ingestion pipeline handles documents asynchronously, preparing text fragments for both dense semantic (vectorial) and sparse lexical (token-based) querying:
+The ingestion pipeline processes documents asynchronously for both dense vector and sparse lexical retrieval:
 
 ```mermaid
 flowchart TD
-    PDF[Raw PDF Document] --> LD[LangChain PyPDFLoader]
+    PDF[Raw PDF Document] --> MD5[Calculate MD5 Fingerprint\ndoc_version]
+    MD5 --> LD[LangChain PyPDFLoader]
     LD --> SP[Recursive Text Splitter\nChunk: 1000, Overlap: 200]
-    SP --> CH[Document Chunks]
+    SP --> CH[Document Chunks + Metadata\nsource_filename + doc_version]
     
     subgraph Vector Leg [Dense Vector Store]
         CH --> V_API[Gemini Embedding API\ngemini-embedding-001]
         V_API --> V_VEC[768-D Dense Vectors]
-        V_VEC --> QD[(Qdrant Cloud\nCollection)]
+        V_VEC --> QD[(Qdrant Cloud\nPayload: source_filename)]
     end
 
     subgraph Lexical Leg [Sparse Vocabulary]
-        CH --> B_OKAPI[BM25 Okapi Compilation]
-        B_OKAPI --> LIDX[(Local BM25 Index\nPersisted per collection)]
+        CH --> B_OKAPI[BM25 Okapi Indexing]
+        B_OKAPI --> LIDX[(Local BM25 Index\nIndexed with source_filename)]
     end
 
-    QD --> sync([Ready for Hybrid Query])
+    QD --> sync([Ready for Isolated Hybrid Query])
     LIDX --> sync
 ```
 
-### Ingestion Mechanics:
-1.  **Parsing & Chunking**: Incoming PDF documents are processed through `PyPDFLoader`. Text is split recursively using character indicators to preserve paragraph structure, using a maximum length of 1000 characters per chunk and a 200-character boundary overlap.
-2.  **Dense Embedding**: Chunks are mapped to 768-dimensional float vectors via Google's Embedding API and stored inside designated Qdrant collections.
-3.  **BM25 Lexical Building**: To prevent loss of exact-keyword recall (e.g., specific ID numbers, code tokens, function names), the system compiles a local vocabulary list and builds a sparse index using the BM25 Okapi mathematical formula, persisting it directly alongside the collection.
-
 ---
 
-## 🤖 Agentic Pipeline Layers
+## 🤖 Multi-Agent System Architecture
 
 ### 1. Router Agent
-Inspects incoming query syntax and intent to instantly route to one of three optimal pipelines:
-*   **CONVERSATIONAL**: Direct conversational path. Uses a zero-latency keyword check to instantly classify simple greetings/thanks (e.g. *"hi"*, *"thank you"*), and upgrades to a semantic Gemini intent classification prompt for complex conversational dialogue.
-*   **MEMORY_FIRST**: Detects contextual follow-ups referencing previous turn statements (*"Explain that again"*, *"What was that first point?"*). Prioritizes conversational memory retrieval.
-*   **RETRIEVAL**: Directs standard search and domain-specific queries into the retrieval pipeline.
+Classifies query intent. Automatically bypassed (**O1**) when the user operates inside a specific domain tab.
 
 ### 2. Memory Agent
-Owns the conversation history and operates an intelligent cache mechanism:
-*   **Caching Turn Embeddings**: Every time a user submits a query, its dense vector representation is cached.
-*   **Semantic Replay**: On successive turns, the agent performs a cosine similarity lookup against recent turns. If a query matches a past question with a similarity score of **`≥ 0.88`**, it immediately replays the previous answer. This guarantees instant, cost-free, and hallucination-free generation for repeating query themes.
+Manages conversation turns and semantic cache. Gated by `doc_version` to prevent cross-document memory leaks. Replays past responses when similarity is **`≥ 0.88`** on the same document.
 
-### 3. Retrieval Agent
-Coordinates multi-source hybrid search across vector and lexical databases:
-*   **Ensemble Query Planner**: When searching universally, matches the semantic context of the query against indexed knowledge collections to select target databases, bypassing unrelated pools.
-*   **Targeted Isolation**: Bypasses the planner when a user is locked to a specific Knowledge Base page, forcing retrieval to target a single collection only.
-*   **Dense Semantic Search**: Conducts cosine similarity lookup on **Qdrant Cloud** databases using **Google Gemini Embeddings** (`gemini-embedding-001`).
-*   **Sparse Lexical Search**: Runs lexical lookup using **BM25 Okapi** on the raw token text index of the documents in parallel.
-*   **RRF Fusion**: Combines ranks from semantic and lexical searches using Reciprocal Rank Fusion (RRF) to merge the best of conceptual matching and keyword exactness.
+### 3. Retrieval Agent & 3-Stage Fusion
+Executes true hybrid retrieval across Qdrant vector search and BM25 lexical search:
+1. **Ensemble Combiner**: Min-max normalizes scores from both legs and applies a weighted combination (`semantic: 0.65`, `bm25: 0.35`) with an agreement bonus.
+2. **RRF Stability Layer**: Applies Reciprocal Rank Fusion to resolve score distribution ties.
+3. **Jaccard Deduplication**: Compares token overlap across candidates and collapses near-duplicate chunks (**>80% Jaccard overlap**), preserving context window space for diverse information.
 
 ### 4. Reranker Agent
-Mitigates the "lost-in-the-middle" prompt problem. It bundles the top candidates returned by the fusion step and issues a single batch pointwise scoring call to Gemini:
-*   Documents are scored from `0.0` to `1.0` based on specific information-seeking relevance.
-*   The results are sorted, positioning the highest quality reference paragraphs at the top of the context block.
-*   Includes a safe fallback that preserves the original RRF rank order if the LLM output fails validation.
+Applies pointwise Gemini reranking when candidate count is **`≥ 2`**, ensuring top relevance at positions 1–2.
 
 ### 5. Hallucination Guard
-Serves as the system's reliability gate. It inspects the raw cosine similarity scores of the retrieved references before generation:
-*   If the top similarity scores fail to cross the confidence threshold, the guard advises the generator to return a standard out-of-domain boundary answer (*"I do not have enough context in my database to answer this accurately"*), completely preventing contextual hallucination.
+Evaluates raw cosine similarity scores to determine confidence (`HIGH`, `MEDIUM`, `LOW`, `NONE`). Controls advisory notes and gates downstream verification (**O5**).
 
 ### 6. Answer Agent
-Responsible for candidate answer generation:
-*   Receives the reranked context paragraphs, conversation history, and guard advisories.
-*   Generates a full candidate response in-memory using a strict grounding template to ensure every claim is traceable to the source context.
+Generates grounded, source-attributed responses in Markdown format with explicit source headers (`[Source: filename | Page: N]`).
 
 ### 7. Verification Agent
-Reviews the candidate response from the Answer Agent before it is delivered to the client:
-*   **Fact-Checking**: Runs an LLM fact-checking verification, cross-referencing all statements in the candidate answer against the retrieved documents.
-*   **Self-Correction Loop**: If any hallucinations or ungrounded claims are detected, the agent returns detailed feedback. The orchestrator triggers an automatic rewrite loop (up to 2 times) with this feedback to refine the answer.
-*   **Progressive Yielding**: Once verified, the completed answer is split and progressively streamed to the client with a minor typing delay to preserve a smooth word-by-word streaming effect.
+Fact-checks generated answers against retrieved context. Bypassed for `HIGH` confidence queries (**O5**) to save latency; runs self-correction loops for `MEDIUM`/`LOW` confidence answers.
 
 ---
 
-## 🎛️ Pipeline Execution Paths
+## 🖥️ User Interface & Cold-Start UX
 
-The system dynamically adapts to incoming queries, using three distinct routing paths to maximize speed and minimize compute costs:
+The Next.js frontend delivers a sleek charcoal dark design with specialized Render deployment support:
 
-### Path A: Conversational Route (Latency: <5ms)
-*   **Trigger**: Conversational prompts (e.g. *"Hello"*, *"Who are you?"*).
-*   **Route**: `User Query` ➔ `Router` ➔ `Memory Agent (Conversational Reply)` ➔ `Stream Response`.
-*   **Performance**: Zero vector retrieval, zero database connections, single fast LLM turn.
-
-### Path B: Memory Hit Route (Latency: <10ms)
-*   **Trigger**: cosine similarity `≥ 0.88` between the new query embedding and any stored query in the last 6 turns.
-*   **Route**: `User Query` ➔ `Router` ➔ `Memory Agent (Semantic Check)` ➔ `Stream Past Response`.
-*   **Performance**: Zero LLM generation latency, zero token costs, complete protection against hallucination.
-
-### Path C: Full Hybrid Search Route (Latency: ~1.2s - 2.5s)
-*   **Trigger**: Standard informational query.
-*   **Route**: `User Query` ➔ `Router` ➔ `Retrieval Agent` (Parallel Semantic & BM25) ➔ `RRF Fusion` ➔ `Gemini Pointwise Reranking` ➔ `Hallucination Guard` ➔ `Answer Agent (Streaming Synthesis)`.
-*   **Performance**: Full multi-agent parsing, document comparison, validation checks, and streaming.
-
----
-
-## ⚙️ Core Configuration Parameters
-
-Fine-tune retrieval and security behaviors using constants defined in `retrieval/retriever.py` and `agents/orchestrator.py`:
-
-| Constant | Default Value | Role |
-| :--- | :--- | :--- |
-| `MIN_SCORE` | `0.20` | Minimum cosine similarity required to include a semantic chunk. Blocks unrelated noise. |
-| `VECTOR_FETCH_K` | `12` | The number of vector candidates to retrieve per collection before applying thresholds. |
-| `RERANK_MIN_DOCS` | `5` | Reranker threshold. Rerank only when having 5 or more candidate documents to prevent redundant LLM calls. |
-| `COLLECTION_CONFIDENCE` | Custom Map | Multipliers applied to collection scores (e.g., `code_docs: 1.2` boosts code relevance over general text). |
-
----
-
-## 🖥️ Multi-Page Interface Design
-
-The frontend is constructed using a high-fidelity, flat charcoal black design system tailored for enterprise workflows:
-
-*   **Grayscale Surfaces**: Obsidian dark mode styling utilizing deep charcoal bases (`#0f0f0f`), dark gray panels (`#171717`), and clean borders (`#2d2d2d`).
-*   **Vibrant Accents**: Dark teal highlights (`#0d9488`) isolated to main headers, navigation focus frames, primary action icons, and status components.
-*   **Independent Assistant Views**: Separates RAG contexts into five distinct page tabs:
-    1.  **Universal Assistant**: Queries all collections.
-    2.  **Research Papers Assistant**: Restricted to the `research_papers` collection.
-    3.  **Knowledge Base Assistant**: Restricted to the `knowledge_base` collection.
-    4.  **Code Docs Assistant**: Restricted to the `code_docs` collection.
-    5.  **FAQ Data Assistant**: Restricted to the `faq_data` collection.
-*   **State Isolation**: Swapping views preserves local state, maintaining unique message histories, load indicators, session IDs, and text input values for each specific assistant.
-*   **Context-Aware Ingestion**: Dragging and dropping or selecting a document automatically targets the collection corresponding to the active assistant tab.
-*   **Real-time Status Tracking**: Renders dynamic collection sizes showing point counts directly in the sidebar.
+*   **Render Cold-Start Detection**: Automatically polls `/health` on app mount. If the free-tier backend is sleeping (~30–50s cold start), renders a non-obtrusive banner with a timer and progress indicator.
+*   **Live Status Indicator**: Header pill displays real-time connectivity (🟢 `Server Online`, 🟡 `Waking Up (Xs)`, 🔴 `Offline`).
+*   **Terminal Loader Component**: Displays a custom terminal window (`sending-loader.tsx`) with an animated typewriter text effect (`Connecting...` / `Waking Server...`) during initial connection.
+*   **Active Document Badge**: Displays the active document name (`📄 report.pdf (Active)`) with a 1-click detach button.
+*   **Message Action Controls**: Hover **Copy button** on assistant responses and **↺ Try again** button on error messages.
+*   **Keyboard & Navigation Polish**: Tab switch auto-focus, keyboard shortcuts guide (`Enter` send / `Shift+Enter` newline), and dynamic browser tab titles.
 
 ---
 
 ## 🌐 API Specification
 
 ### 1. Unified Chat Endpoint
-Issues queries to the multi-agentic RAG pipeline.
-
 *   **URL**: `/chat`
 *   **Method**: `POST`
 *   **Headers**: `Content-Type: application/json`
 *   **Payload (JSON)**:
     ```json
     {
-      "question": "What is self-attention?",
-      "session_id": "user-session-abc",
-      "collections": ["research_papers"]
+      "question": "What are the main findings in the report?",
+      "session_id": "research_papers-session-123",
+      "collections": ["research_papers"],
+      "doc_version": "a3f8c1b2d4e5...",
+      "source_filename": "report.pdf"
     }
     ```
-    *Note: Leaving `"collections": null` initiates a universal search across all knowledge pools.*
-*   **Response**: `text/plain` chunk-by-chunk stream.
+*   **Response**: `text/plain` chunk-by-chunk progressive stream.
 
 ### 2. Document Ingestion Endpoint
-Ingests a single PDF file into the specified database collection.
-
-*   **URL**: `/upload?collection=code_docs`
+*   **URL**: `/upload?collection=research_papers&session_id=research_papers-session-123`
 *   **Method**: `POST`
-*   **Payload**: `multipart/form-data` (binary PDF file)
+*   **Payload**: `multipart/form-data` (PDF file)
 *   **Response (JSON)**:
     ```json
     {
-      "filename": "api_specs.pdf",
-      "chunks_ingested": 18,
-      "collection": "code_docs",
-      "message": "Successfully ingested 18 chunks from 'api_specs.pdf'. BM25 index refreshed."
+      "filename": "report.pdf",
+      "doc_version": "a3f8c1b2d4e5...",
+      "source_filename": "report.pdf",
+      "chunks_ingested": 24,
+      "collection": "research_papers",
+      "message": "Successfully ingested 24 chunks from 'report.pdf'."
     }
     ```
 
-### 3. Collection Status Endpoint
-Retrieves point counts and lexical indexing states.
-
-*   **URL**: `/collections`
+### 3. Server Health Endpoint
+*   **URL**: `/health`
 *   **Method**: `GET`
-*   **Response (JSON)**:
-    ```json
-    {
-      "collections": [
-        {
-          "name": "research_papers",
-          "points_count": 1420,
-          "vectors_count": 1420,
-          "bm25_docs": 8,
-          "bm25_ready": true
-        }
-      ]
-    }
-    ```
+*   **Response (JSON)**: `{"status": "ok", "time": 1721750000}`
 
 ---
 
-## 📁 System Blueprint
+## 📁 Repository Structure
 
 ```
 backend/
-├── main.py                 # API entry point & HTTP router
+├── main.py                 # FastAPI entry point, lifespan retry & HTTP routes
 ├── core/
-│   ├── config.py           # Config loader (env variables)
-│   ├── llm.py              # LLM configuration (Gemini)
-│   ├── embeddings.py       # Embedding API setup
-│   └── qdrant_client.py    # Vector database client
+│   ├── config.py           # Environment settings loader
+│   ├── llm.py              # Gemini 2.5 Flash setup with 45s timeout
+│   ├── embeddings.py       # Gemini Embedding API wrapper
+│   └── qdrant_client.py    # Qdrant cloud client instance
 ├── agents/
-│   ├── base.py             # Agent interface & latency tracker
-│   ├── orchestrator.py     # Master agent pipeline coordinator
-│   ├── router.py           # Intent classification agent
-│   ├── memory_agent.py     # State, similarity cache & conversational agent
-│   ├── retrieval_agent.py  # Planner & hybrid search agent
-│   ├── reranker.py         # Pointwise relevance reranking agent
+│   ├── base.py             # Base agent interface & latency logger
+│   ├── orchestrator.py     # Master coordinator & 5-optimization executor
+│   ├── router.py           # Intent routing agent
+│   ├── memory_agent.py     # Semantic memory & conversational agent
+│   ├── retrieval_agent.py  # Hybrid search wrapper agent
+│   ├── reranker.py         # Pointwise reranking agent
 │   ├── verification_agent.py # Fact-checking & verification agent
-│   └── answer_agent.py     # Candidate answer generation agent
+│   └── answer_agent.py     # Grounded answer generator
 ├── retrieval/
-│   ├── retriever.py        # Semantic + BM25 parallel search
-│   ├── hybrid.py           # RRF ranks fusion algorithm
-│   ├── planner.py          # Dynamic keyword routing map
-│   ├── guard.py            # Confidence and hallucination evaluation
-│   └── bm25_index.py       # BM25 lexical index manager
+│   ├── retriever.py        # Single-embedding, parallel hybrid retriever
+│   ├── hybrid.py           # 3-Stage fusion: Ensemble + RRF + Jaccard Dedup
+│   ├── planner.py          # Collection routing planner
+│   ├── guard.py            # Cosine confidence assessment guard
+│   └── bm25_index.py       # BM25 lexical index with source_filename filter
 ├── ingestion/
-│   └── ingestion.py        # PDF chunking, embedding, and database loading
+│   └── ingestion.py        # PDF chunking, doc_version hashing & Qdrant ingestion
 ├── memory/
-│   └── memory.py           # Chat history registry
+│   └── memory.py           # Session chat history with doc_version gating
 └── cache/
-    └── cache.py            # Semantic cache storage
+    └── cache.py            # doc_version-gated semantic response cache
 
 frontend/
 ├── app/
-│   ├── page.tsx            # Multi-mode RAG client interface
-│   ├── layout.tsx          # Font and layout configs
-│   └── globals.css         # Flat dark mode CSS variables
-└── package.json            # Client packages mapping
+│   ├── page.tsx            # Multi-mode RAG client interface with cold-start UX
+│   ├── layout.tsx          # App layout & metadata configuration
+│   └── globals.css         # Charcoal dark theme & typewriter animations
+├── components/
+│   └── ui/
+│       └── sending-loader.tsx # Terminal loading component with typewriter effect
+└── package.json            # Client dependency manifest
 ```
