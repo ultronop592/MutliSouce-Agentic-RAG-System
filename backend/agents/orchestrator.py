@@ -177,7 +177,9 @@ class Orchestrator:
             context = "No relevant documents found."
 
         # Step C5: Conversation memory for context
-        memory_str = chat_memory.format_history(session_id)
+        # Pass doc_version so format_history() ONLY includes turns from the
+        # current document — prevents old-PDF context bleeding into the prompt.
+        memory_str = chat_memory.format_history(session_id, current_doc_version=doc_version)
 
         # Step C6: Verified Answer Generation & Self-Correction Loop
         full_response = ""

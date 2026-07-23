@@ -70,11 +70,34 @@ class ChatMemory:
         """Return the last n turns for a session (used by MemoryAgent)."""
         return self._store.get(session_id, [])[-n:]
 
-    def format_history(self, session_id: str) -> str:
-        """Format the last max_turns turns as a readable dialogue string."""
+    def format_history(
+        self,
+        session_id: str,
+        current_doc_version: str | None = None,
+    ) -> str:
+        """Format conversation turns as a readable dialogue string.
+
+        current_doc_version (optional):
+            When provided, only turns that were created for the SAME document
+            version are included. This prevents answers from a previous PDF
+            leaking into the LLM prompt when the user uploads a new document.
+            If None, all turns are included (backward-compatible behaviour,
+            used for conversational greetings that carry no doc context).
+        """
         history = self._store.get(session_id, [])
         if not history:
             return ""
+
+        # Filter to same-document turns when a doc_version is active
+        if current_doc_version is not None:
+            history = [
+                turn for turn in history
+                if turn.get("doc_version") == current_doc_version
+            ]
+
+        if not history:
+            return ""
+
         lines = []
         for turn in history:
             lines.append(f"User: {turn['user']}")

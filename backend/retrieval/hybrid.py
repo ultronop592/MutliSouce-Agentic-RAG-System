@@ -68,26 +68,29 @@ def _bm25_search_all(
     selected: list[str], query: str, source_filename: str | None = None
 ) -> dict[str, list[tuple[str, float]]]:
     """Run BM25 search on all selected collections independently.
-    When source_filename is set, filter results to only texts that
-    originated from that file (matched against the stored text content).
+    When source_filename is set, the BM25 index now filters to only
+    chunks from that specific file (using stored source_filename metadata).
+    This prevents cross-document keyword bleed when multiple PDFs exist
+    in the same collection.
     """
     per_col: dict[str, list[tuple[str, float]]] = {}
     for collection in selected:
-        hits = bm25_manager.search(collection, query, top_k=BM25_TOP_K)
-        # ── Source file filter for BM25 ──────────────────────────────────
-        # BM25 indexes raw text strings with no metadata. We identify which
-        # file a chunk belongs to via the [Source: filename | Page: N] header
-        # that the semantic search leg injects. But since BM25 works on raw
-        # stored texts (no header), we rely on the filename appearing in the
-        # text being searched. For robustness: if source_filename is set,
-        # we skip BM25 filtering here and rely on semantic search filtering only,
-        # as the BM25 index stores raw text without source metadata.
-        # This is safe: semantic search is already filtered by Qdrant payload.
+        # Pass source_filename so bm25_manager.search() restricts results
+        # to only chunks that belong to the active uploaded PDF.
+        hits = bm25_manager.search(
+            collection, query, top_k=BM25_TOP_K, source_filename=source_filename
+        )
         per_col[collection] = hits
         if hits:
-            logger.debug("BM25 '%s': %d hits (top=%.4f)", collection, len(hits), hits[0][1])
+            logger.debug(
+                "BM25 '%s': %d hits (top=%.4f, source_filter=%s)",
+                collection, len(hits), hits[0][1], source_filename or "none",
+            )
         else:
-            logger.debug("BM25 '%s': no hits (index empty or no keyword overlap)", collection)
+            logger.debug(
+                "BM25 '%s': no hits (index empty, no keyword overlap, or source_filter='%s')",
+                collection, source_filename or "none",
+            )
     return per_col
 
 
