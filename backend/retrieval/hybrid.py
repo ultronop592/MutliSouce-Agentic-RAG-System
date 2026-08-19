@@ -135,15 +135,18 @@ def fuse_all_collections(
     per_collection_semantic: dict[str, list[tuple[str, float]]],
     query: str,
     source_filename: str | None = None,
+    visual_hits: list[tuple[str, float]] | None = None,
 ) -> list[tuple[str, float]]:
     """
     Full three-stage fusion: Ensemble Combiner → RRF Stability → Deduplication.
+    Now supports visual_hits from the visual_descriptions collection.
 
     Args:
-        per_collection_semantic: {collection: [(text, semantic_score), ...]}\
+        per_collection_semantic: {collection: [(text, semantic_score), ...]}
                                   Results from Qdrant vector search (post-threshold).
         query:                    Rewritten search query (used for BM25 search).
         source_filename:          Optional: passed to BM25 search for logging/context.
+        visual_hits:              Optional: [(text, score), ...] from visual_descriptions.
 
     Returns:
         [(text, final_score), ...] globally ranked, deduplicated, capped to FINAL_TOP_K.
@@ -155,9 +158,10 @@ def fuse_all_collections(
 
     total_bm25 = sum(len(h) for h in per_collection_bm25.values())
     total_sem = sum(len(h) for h in per_collection_semantic.values())
+    total_vis = len(visual_hits) if visual_hits else 0
     logger.info(
-        "Fusion input: semantic=%d docs, BM25=%d docs across %d collections",
-        total_sem, total_bm25, len(selected),
+        "Fusion input: semantic=%d docs, BM25=%d docs, visual=%d docs across %d collections",
+        total_sem, total_bm25, total_vis, len(selected),
     )
 
     # ── Stage 1: Weighted Ensemble Combination ───────────────────────────────
@@ -167,9 +171,19 @@ def fuse_all_collections(
         top_k=FINAL_TOP_K * 3,   # fetch extra candidates so dedup doesn't shrink below FINAL_TOP_K
     )
 
+    # Fold in visual hits directly into ensemble results if available
+    if visual_hits:
+        ensemble_dict = dict(ensemble_results)
+        for text, score in visual_hits:
+            if text in ensemble_dict:
+                ensemble_dict[text] = max(ensemble_dict[text], score)
+            else:
+                ensemble_dict[text] = score
+        ensemble_results = sorted(ensemble_dict.items(), key=lambda x: x[1], reverse=True)
+
     if not ensemble_results:
-        # Both legs returned nothing
-        logger.warning("Ensemble returned 0 results — both retrieval legs empty")
+        # All legs returned nothing
+        logger.warning("Ensemble returned 0 results — all retrieval legs empty")
         return []
 
     # ── Stage 2: RRF Stability Layer ─────────────────────────────────────────
@@ -178,8 +192,6 @@ def fuse_all_collections(
 
     # ── Stage 3: Near-duplicate deduplication ─────────────────────────────────
     # Chunks with > 80% Jaccard token overlap are collapsed to the highest-ranked one.
-    # This prevents the LLM context window from being saturated with repeated content
-    # (common when multiple PDFs or overlapping chunk windows land in the same result set).
     before_dedup = len(final)
     final = _deduplicate(final, jaccard_threshold=0.80)
     final = final[:FINAL_TOP_K]

@@ -266,29 +266,35 @@ async def hybrid_retrieve(
 
     # ── Step 3: Parallel Qdrant semantic search across all collections (O4) ───
     # asyncio.gather fires all collection queries simultaneously.
-    # For universal tab with 5 collections this reduces Qdrant latency from
-    # 5x sequential RTT to 1x RTT — typically saves 400-800ms.
     tasks = [
         _semantic_search_collection(c, query_vector, source_filename=source_filename)
         for c in selected
     ]
-    semantic_results_per_col = await asyncio.gather(*tasks)
+    # Also search visual_descriptions collection in the same parallel gather
+    visual_task = _semantic_search_collection(
+        "visual_descriptions", query_vector, source_filename=source_filename
+    )
+    all_semantic_results = await asyncio.gather(*tasks, visual_task)
 
-    # Map collection -> semantic hits
-    per_collection: dict[str, list[tuple[str, float]]] = {
+    # Map selected collections -> semantic hits
+    semantic_results_per_col: dict[str, list[tuple[str, float]]] = {
         col: hits
-        for col, hits in zip(selected, semantic_results_per_col)
+        for col, hits in zip(selected, all_semantic_results[:-1])
     }
+    visual_hits: list[tuple[str, float]] = all_semantic_results[-1]
 
-    total_semantic = sum(len(h) for h in per_collection.values())
+    total_semantic = sum(len(h) for h in semantic_results_per_col.values())
     logger.debug(
-        "Semantic search: %d docs across %d collections (post-threshold, source_filter=%s)",
-        total_semantic, len(selected), source_filename or "none",
+        "Semantic search: %d text docs, %d visual docs across %d collections (post-threshold, source_filter=%s)",
+        total_semantic, len(visual_hits), len(selected), source_filename or "none",
     )
 
     # ── Step 4+5: BM25 search + Ensemble + RRF fusion + Deduplication ────────
     fused: list[tuple[str, float]] = fuse_all_collections(
-        per_collection, rewritten, source_filename=source_filename
+        per_collection_semantic=semantic_results_per_col,
+        query=rewritten,
+        source_filename=source_filename,
+        visual_hits=visual_hits,
     )
 
     if not fused:

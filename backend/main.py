@@ -39,6 +39,7 @@ from retrieval.bm25_index import bm25_manager
 from memory.memory import chat_memory
 from cache.cache import response_cache
 from ingestion.ingestion import ingest_pdf, ensure_collections, COLLECTIONS
+from ingestion.visual_ingestion import ingest_pdf_visual
 
 logging.basicConfig(
     level=logging.INFO,
@@ -143,6 +144,7 @@ _session_source_file: dict[str, str] = {}
 class UploadResponse(BaseModel):
     filename: str
     chunks_ingested: int
+    visual_pages_ingested: int = 0  # Number of pages with visual descriptions generated
     collection: str
     doc_version: str = ""      # MD5 fingerprint — returned to frontend to use in chat requests
     source_filename: str = ""  # bare filename — returned so frontend can send it in chat requests
@@ -292,13 +294,19 @@ async def upload_pdf(
         with open(temp_path, "wb") as f:
             f.write(content)
 
-        chunks_count = ingest_pdf(temp_path, collection)
+        bare_filename = os.path.basename(file.filename)
+
+        # ── Dual Ingestion (Text Chunks + Gemini Vision Page Summaries) ───────
+        import asyncio
+        chunks_count, visual_count = await asyncio.gather(
+            asyncio.to_thread(ingest_pdf, temp_path, collection),
+            ingest_pdf_visual(temp_path, bare_filename),
+        )
 
         # ── Register doc_version in server-side map ──────────────────────────
         # Key by session_id (most accurate) when the frontend provides it,
         # AND by collection name (fallback for specific-tab uploads that don't
         # send session_id). This covers both Universal and specific-tab flows.
-        bare_filename = os.path.basename(file.filename)
         if session_id:
             _session_doc_version[session_id] = doc_version
             _session_source_file[session_id] = bare_filename
@@ -310,18 +318,20 @@ async def upload_pdf(
         response_cache.set_doc_version(collection, doc_version)
 
         logger.info(
-            "Upload complete: '%s' | %d chunks | doc_version=%s",
-            file.filename, chunks_count, doc_version,
+            "Upload complete: '%s' | %d text chunks | %d visual pages | doc_version=%s",
+            file.filename, chunks_count, visual_count, doc_version,
         )
 
         return UploadResponse(
             filename=file.filename,
             chunks_ingested=chunks_count,
+            visual_pages_ingested=visual_count,
             collection=collection,
             doc_version=doc_version,
             source_filename=bare_filename,
             message=(
-                f"Successfully ingested {chunks_count} chunks from '{file.filename}'. "
+                f"Successfully ingested {chunks_count} text chunks and "
+                f"{visual_count} visual page descriptions from '{file.filename}'. "
                 f"BM25 index refreshed. Document version: {doc_version[:8]}..."
             ),
         )

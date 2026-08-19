@@ -17,6 +17,7 @@ COLLECTIONS = [
     "knowledge_base",
     "code_docs",
     "faq_data",
+    "visual_descriptions",
 ]
 
 

@@ -3,7 +3,7 @@ services:
     name: multi-source-rag-backend
     runtime: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get update && apt-get install -y poppler-utils && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: GEMINI_API_KEY
